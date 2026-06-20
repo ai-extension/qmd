@@ -347,6 +347,12 @@ const embedResult = await store.embed({
     console.log(`Embedding ${current}/${total}`)
   },
 })
+
+// Auto-update watched collections before a read (mirrors the CLI watch behavior).
+// Re-indexes (and, when embed: true, re-embeds) only the `watch: true` collections
+// in scope, skipping unchanged files. Failures are swallowed so the read proceeds.
+await store.autoFreshForRead(["docs"], { embed: true })  // scope; undefined = all watched
+const results = await store.search({ queries: [{ type: "vec", query: "auth flow" }] })
 ```
 
 #### Types
@@ -580,7 +586,7 @@ qmd collection rename myproject my-project
 qmd ls notes
 qmd ls notes/subfolder
 
-# Show collection details (path, glob mask, include status, context count)
+# Show collection details (path, glob mask, include status, watch status, context count)
 qmd collection show notes
 
 # Include or exclude a collection from default (unscoped) queries
@@ -590,7 +596,40 @@ qmd collection exclude notes
 # Run a command before every `qmd update` (e.g. git pull); empty arg clears it
 qmd collection update-cmd notes 'git pull --rebase'
 qmd collection update-cmd notes
+
+# Auto-update a collection on read when its files change (see below)
+qmd collection add ~/notes --name notes --watch   # enable at creation
+qmd collection watch notes                         # enable for an existing collection
+qmd collection unwatch notes                       # disable
 ```
+
+### Auto-Update on Read (`watch`)
+
+Mark a collection with `watch: true` and qmd keeps its index fresh **just in
+time, in the same process as your read** — no background daemon:
+
+```sh
+qmd collection watch notes      # enable
+qmd search "auth flow"          # re-indexes `notes` (if changed), then searches
+qmd query "how auth works"      # re-indexes AND re-embeds `notes`, then queries
+qmd collection unwatch notes    # disable
+```
+
+- **`qmd search`** (keyword/BM25) re-indexes the changed files first — no model needed.
+- **`qmd query` / `qmd vsearch`** (semantic) also re-embed changed content.
+- **Scope follows the read's `-c` filter:** `qmd query -c notes` refreshes only
+  `notes`; an unscoped read refreshes every watched collection. Collections
+  without `watch: true` are never auto-updated (use `qmd update` manually).
+- **Cheap when nothing changed:** a stat-only `mtime`+`size` stamp per file
+  skips the whole re-index when nothing changed, and re-reads only the files
+  that actually changed otherwise.
+- The MCP `query` tool and REST `/query` endpoint perform the same auto-update.
+- Failures degrade gracefully — a failed refresh logs a warning to stderr and
+  the read proceeds on the existing index.
+
+> Watch is **off by default** (opt-in). The watch flag is stored in your config;
+> `qmd update` is unaffected and always re-hashes every file (authoritative).
+> After a reboot, run any read on a watched collection to resume freshening it.
 
 ### Generate Vector Embeddings
 
