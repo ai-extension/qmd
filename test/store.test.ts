@@ -48,6 +48,9 @@ import {
   isDocid,
   syncConfigToDb,
   reindexCollection,
+  renameCollection,
+  removeCollection,
+  FRESHNESS_KEY_PREFIX,
   STRONG_SIGNAL_MIN_SCORE,
   STRONG_SIGNAL_MIN_GAP,
   insertContent,
@@ -481,6 +484,96 @@ describe("Store Creation", () => {
     try {
       await unlink(testDbPath);
     } catch {}
+  });
+});
+
+// =============================================================================
+// Freshness fingerprint lifecycle (watch / auto-update on read)
+// =============================================================================
+
+describe("Freshness fingerprint lifecycle", () => {
+  test("renameCollection migrates the freshness fingerprint key (no needless re-index)", async () => {
+    const store = await createTestStore();
+    const oldKey = `${FRESHNESS_KEY_PREFIX}old`;
+    const newKey = `${FRESHNESS_KEY_PREFIX}new`;
+    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(oldKey, "fp-123");
+
+    renameCollection(store.db, "old", "new");
+
+    const oldRow = store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(oldKey) as { value?: string } | undefined;
+    const newRow = store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(newKey) as { value?: string } | undefined;
+    expect(oldRow).toBeUndefined();        // old key gone (no orphan)
+    expect(newRow?.value).toBe("fp-123");  // value carried over → next read skips re-index
+
+    await cleanupTestDb(store);
+  });
+
+  test("removeCollection clears the freshness fingerprint key (no orphan)", async () => {
+    const store = await createTestStore();
+    const key = `${FRESHNESS_KEY_PREFIX}gone`;
+    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(key, "fp-456");
+
+    removeCollection(store.db, "gone");
+
+    const row = store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(key) as { value?: string } | undefined;
+    expect(row).toBeUndefined();
+
+    await cleanupTestDb(store);
+  });
+});
+
+// =============================================================================
+// reindexCollection mtime+size fast-path (watch auto-update)
+// =============================================================================
+
+describe("reindexCollection skipUnchangedPaths", () => {
+  const contentOf = (store: Store, collection: string, path: string): string =>
+    (store.db.prepare(
+      `SELECT c.doc AS content FROM documents d JOIN content c ON d.hash = c.hash WHERE d.collection = ? AND d.path = ?`,
+    ).get(collection, path) as { content?: string } | undefined)?.content ?? "";
+
+  test("skips re-reading files in the skip set, re-reads the rest", async () => {
+    const store = await createTestStore();
+    const dir = await mkdtemp(join(tmpdir(), "qmd-skip-"));
+    await writeFile(join(dir, "a.md"), "# A\nalpha original\n");
+    await writeFile(join(dir, "b.md"), "# B\nbeta original\n");
+
+    await reindexCollection(store, dir, "**/*.md", "skipcol");
+
+    // Change BOTH files on disk...
+    await writeFile(join(dir, "a.md"), "# A\nalpha CHANGED body\n");
+    await writeFile(join(dir, "b.md"), "# B\nbeta CHANGED body\n");
+
+    // ...but tell reindex that a.md is unchanged → it must be skipped.
+    const result = await reindexCollection(store, dir, "**/*.md", "skipcol", {
+      skipUnchangedPaths: new Set(["a.md"]),
+    });
+
+    // a.md skipped → still OLD content; b.md re-read → NEW content.
+    expect(contentOf(store, "skipcol", "a.md")).toContain("alpha original");
+    expect(contentOf(store, "skipcol", "a.md")).not.toContain("CHANGED");
+    expect(contentOf(store, "skipcol", "b.md")).toContain("beta CHANGED");
+    expect(result.updated).toBe(1);   // only b.md
+    expect(result.unchanged).toBe(1); // a.md skipped, counted unchanged
+
+    await rm(dir, { recursive: true, force: true });
+    await cleanupTestDb(store);
+  });
+
+  test("does not skip a file in the set that is not yet indexed (no dropped doc)", async () => {
+    const store = await createTestStore();
+    const dir = await mkdtemp(join(tmpdir(), "qmd-skip2-"));
+    await writeFile(join(dir, "new.md"), "# New\nfresh body here\n");
+
+    // new.md is in the skip set but was never indexed → must still be indexed.
+    const result = await reindexCollection(store, dir, "**/*.md", "skipcol2", {
+      skipUnchangedPaths: new Set(["new.md"]),
+    });
+    expect(result.indexed).toBe(1);
+    expect(contentOf(store, "skipcol2", "new.md")).toContain("fresh body here");
+
+    await rm(dir, { recursive: true, force: true });
+    await cleanupTestDb(store);
   });
 });
 

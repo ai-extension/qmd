@@ -15,9 +15,12 @@
   `qmd search` re-indexes (FTS) first; `qmd query`/`qmd vsearch` also re-embed
   changed content. Scope follows the read's `-c` filter (only the queried watched
   collection is refreshed, not every watched one) or all watched collections when
-  unscoped. A stat-only fingerprint skips the work when nothing changed, and the
-  MCP `query` tool / REST `/query` endpoint do the same auto-update. Failures
-  degrade gracefully: the read proceeds on the existing index.
+  unscoped. A stat-only mtime+size stamp per file makes this cheap: when nothing
+  changed the whole re-index is skipped, and when something did change only the
+  changed files are re-read (unchanged files are skipped). `qmd update` is
+  unaffected — it still re-hashes every file (authoritative). The MCP `query`
+  tool / REST `/query` endpoint do the same auto-update. Failures degrade
+  gracefully: the read proceeds on the existing index.
 
 ### Documentation
 

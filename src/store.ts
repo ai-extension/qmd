@@ -1266,6 +1266,13 @@ export type ReindexResult = {
 };
 
 /**
+ * store_config key prefix for per-collection freshness fingerprints (see
+ * freshness.ts). Defined here so rename/remove can migrate/clear the key
+ * without store.ts importing freshness.ts (which would be a circular import).
+ */
+export const FRESHNESS_KEY_PREFIX = "freshness:";
+
+/**
  * List the files a collection's index considers: applies the collection glob,
  * the default exclude dirs, the optional ignore patterns, and the hidden-file
  * filter. Returned paths are relative to collectionPath.
@@ -1310,6 +1317,14 @@ export async function reindexCollection(
   options?: {
     ignorePatterns?: string[];
     onProgress?: (info: ReindexProgress) => void;
+    /**
+     * Relative paths (as returned by listCollectionFiles) the caller has already
+     * determined are unchanged — reindex trusts them and skips the read+hash for
+     * those that are still indexed. Used by the lazy auto-update (freshness)
+     * path, which detects unchanged files via a mtime+size stamp. `qmd update`
+     * does NOT pass this, so it always re-reads and re-hashes (authoritative).
+     */
+    skipUnchangedPaths?: Set<string>;
   }
 ): Promise<ReindexResult> {
   const db = store.db;
@@ -1328,6 +1343,17 @@ export async function reindexCollection(
     // handelize() is NOT applied at index time — it is display-only.
     const path = normalizePathSeparators(relativeFile);
     seenPaths.add(path);
+
+    // Fast-path: caller vouched this file is unchanged (mtime+size match). Trust
+    // it and skip the read+hash — but only if it is actually still indexed, so a
+    // stale skip hint can never drop a document.
+    if (options?.skipUnchangedPaths?.has(relativeFile)
+      && findOrMigrateLegacyDocument(db, collectionName, path)) {
+      unchanged++;
+      processed++;
+      options?.onProgress?.({ file: relativeFile, current: processed, total });
+      continue;
+    }
 
     let content: string;
     try {
@@ -3077,6 +3103,9 @@ export function removeCollection(db: Database, collectionName: string): { delete
   // Remove from store_collections
   deleteStoreCollection(db, collectionName);
 
+  // Drop the collection's freshness fingerprint so no stale store_config row lingers.
+  db.prepare(`DELETE FROM store_config WHERE key = ?`).run(`${FRESHNESS_KEY_PREFIX}${collectionName}`);
+
   return {
     deletedDocs: docResult.changes,
     cleanedHashes: cleanupResult.changes
@@ -3094,6 +3123,11 @@ export function renameCollection(db: Database, oldName: string, newName: string)
 
   // Rename in store_collections
   renameStoreCollection(db, oldName, newName);
+
+  // Migrate the freshness fingerprint to the new name so the next read does not
+  // needlessly re-index a collection whose files did not actually change.
+  db.prepare(`UPDATE store_config SET key = ? WHERE key = ?`)
+    .run(`${FRESHNESS_KEY_PREFIX}${newName}`, `${FRESHNESS_KEY_PREFIX}${oldName}`);
 }
 
 // =============================================================================
