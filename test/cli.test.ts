@@ -986,7 +986,7 @@ ${token}
   });
 });
 
-describe("CLI Update Command - per-collection (-c) and embed (-e)", () => {
+describe("CLI Update Command - per-collection (-c)", () => {
   // Build an isolated env with two indexed collections (alpha, beta).
   async function setupTwoCollections() {
     const env = await createIsolatedTestEnv("update-c");
@@ -1033,15 +1033,82 @@ describe("CLI Update Command - per-collection (-c) and embed (-e)", () => {
     expect(stdout).toContain("Updating 2 collection(s)");
   });
 
-  test("-e routes to the embed step after re-indexing", async () => {
-    const env = await setupTwoCollections();
-    // The "Embedding <name>" banner is printed by updateCollections immediately
-    // before it invokes the embed path, so it appears regardless of what the
-    // embed itself does next (success, missing model, or a native teardown
-    // abort). Asserting only the banner keeps this a deterministic check that
-    // -e is wired through, without depending on local model/GPU availability.
-    const { stdout } = await runQmd(["update", "-c", "alpha", "-e"], env);
-    expect(stdout).toContain("Embedding alpha");
+});
+
+describe("CLI Watch / auto-update on read", () => {
+  // Build an isolated env with one collection containing a single markdown file.
+  // Returns the env plus the on-disk file path so tests can mutate it.
+  async function setupWatchableCollection(opts: { watch: boolean }) {
+    const env = await createIsolatedTestEnv("watch");
+    const dir = join(testDir, `watch-col-${testCounter}`);
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, "note.md");
+    await writeFile(file, `# Note\nzzqmdoriginaltoken first content\n`);
+    const addArgs = ["collection", "add", dir, "--name", "wcol"];
+    if (opts.watch) addArgs.push("--watch");
+    const add = await runQmd(addArgs, env);
+    expect(add.exitCode).toBe(0);
+    return { env, file };
+  }
+
+  test("collection add --watch enables watch (shown by collection show)", async () => {
+    const { env } = await setupWatchableCollection({ watch: true });
+    const show = await runQmd(["collection", "show", "wcol"], env);
+    expect(show.exitCode).toBe(0);
+    expect(show.stdout).toContain("Watch:");
+    expect(show.stdout).toMatch(/Watch:\s+yes/);
+  });
+
+  test("collection watch / unwatch toggles the flag", async () => {
+    const { env } = await setupWatchableCollection({ watch: false });
+    expect((await runQmd(["collection", "show", "wcol"], env)).stdout).toMatch(/Watch:\s+no/);
+
+    const on = await runQmd(["collection", "watch", "wcol"], env);
+    expect(on.exitCode).toBe(0);
+    expect((await runQmd(["collection", "show", "wcol"], env)).stdout).toMatch(/Watch:\s+yes/);
+
+    const off = await runQmd(["collection", "unwatch", "wcol"], env);
+    expect(off.exitCode).toBe(0);
+    expect((await runQmd(["collection", "show", "wcol"], env)).stdout).toMatch(/Watch:\s+no/);
+  });
+
+  test("collection watch on unknown collection errors", async () => {
+    const { env } = await setupWatchableCollection({ watch: false });
+    const res = await runQmd(["collection", "watch", "does-not-exist"], env);
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("Collection not found");
+  });
+
+  test("search auto-reindexes a watched collection when the file changes", async () => {
+    const { env, file } = await setupWatchableCollection({ watch: true });
+    // The original token is searchable right after add.
+    const before = await runQmd(["search", "zzqmdoriginaltoken", "--files"], env);
+    expect(before.stdout).toContain("wcol");
+
+    // Change the file content (different length too, so the stat fingerprint
+    // changes regardless of mtime granularity).
+    await writeFile(file, `# Note\nzzqmdchangedtoken brand new replacement body here\n`);
+
+    // Searching the NEW token finds it without any manual update — the read
+    // auto-reindexed the watched collection first.
+    const afterNew = await runQmd(["search", "zzqmdchangedtoken", "--files"], env);
+    expect(afterNew.stdout).toContain("wcol");
+    // The OLD token is gone from the re-indexed content.
+    const afterOld = await runQmd(["search", "zzqmdoriginaltoken", "--files"], env);
+    expect(afterOld.stdout).not.toContain("wcol");
+  });
+
+  test("search does NOT auto-update a collection without watch", async () => {
+    const { env, file } = await setupWatchableCollection({ watch: false });
+    await writeFile(file, `# Note\nzzqmdchangedtoken brand new replacement body here\n`);
+    // No watch → no auto-update → the new token is not indexed yet.
+    const afterNew = await runQmd(["search", "zzqmdchangedtoken", "--files"], env);
+    expect(afterNew.stdout).not.toContain("wcol");
+    // A manual update picks it up.
+    const upd = await runQmd(["update", "-c", "wcol"], env);
+    expect(upd.exitCode).toBe(0);
+    const afterUpdate = await runQmd(["search", "zzqmdchangedtoken", "--files"], env);
+    expect(afterUpdate.stdout).toContain("wcol");
   });
 });
 

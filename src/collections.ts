@@ -31,6 +31,7 @@ export interface Collection {
   context?: ContextMap;      // Optional context definitions
   update?: string;           // Optional bash command to run during qmd update
   includeByDefault?: boolean; // Include in queries by default (default: true)
+  watch?: boolean;           // Auto re-index (and embed for semantic search) on read when files change (default: false)
 }
 
 /**
@@ -271,11 +272,18 @@ export function getDefaultCollectionNames(): string[] {
 }
 
 /**
+ * Get collections marked for auto-update on read (watch: true)
+ */
+export function getWatchedCollections(): NamedCollection[] {
+  return listCollections().filter(c => c.watch === true);
+}
+
+/**
  * Update a collection's settings
  */
 export function updateCollectionSettings(
   name: string,
-  settings: { update?: string | null; includeByDefault?: boolean }
+  settings: { update?: string | null; includeByDefault?: boolean; watch?: boolean }
 ): boolean {
   const config = loadConfig();
   const collection = config.collections[name];
@@ -295,6 +303,15 @@ export function updateCollectionSettings(
       delete collection.includeByDefault;
     } else {
       collection.includeByDefault = settings.includeByDefault;
+    }
+  }
+
+  if (settings.watch !== undefined) {
+    if (settings.watch === true) {
+      collection.watch = true;
+    } else {
+      // false is default, remove the field to keep YAML clean
+      delete collection.watch;
     }
   }
 

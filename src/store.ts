@@ -1266,6 +1266,39 @@ export type ReindexResult = {
 };
 
 /**
+ * List the files a collection's index considers: applies the collection glob,
+ * the default exclude dirs, the optional ignore patterns, and the hidden-file
+ * filter. Returned paths are relative to collectionPath.
+ *
+ * Shared by reindexCollection and the freshness fingerprint so both always see
+ * exactly the same file set — keeping them in sync avoids the fingerprint
+ * reporting "unchanged" while reindex would actually pick up a different set.
+ */
+export async function listCollectionFiles(
+  collectionPath: string,
+  globPattern: string,
+  ignorePatterns?: string[],
+): Promise<string[]> {
+  const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
+  const allIgnore = [
+    ...excludeDirs.map(d => `**/${d}/**`),
+    ...(ignorePatterns || []),
+  ];
+  const allFiles: string[] = await fastGlob(globPattern, {
+    cwd: collectionPath,
+    onlyFiles: true,
+    followSymbolicLinks: false,
+    dot: false,
+    ignore: allIgnore,
+  });
+  // Filter hidden files/folders (dot:false handles top-level but not nested)
+  return allFiles.filter(file => {
+    const parts = file.split("/");
+    return !parts.some(part => part.startsWith("."));
+  });
+}
+
+/**
  * Re-index a single collection by scanning the filesystem and updating the database.
  * Pure function — no console output, no db lifecycle management.
  */
@@ -1281,24 +1314,8 @@ export async function reindexCollection(
 ): Promise<ReindexResult> {
   const db = store.db;
   const now = new Date().toISOString();
-  const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
 
-  const allIgnore = [
-    ...excludeDirs.map(d => `**/${d}/**`),
-    ...(options?.ignorePatterns || []),
-  ];
-  const allFiles: string[] = await fastGlob(globPattern, {
-    cwd: collectionPath,
-    onlyFiles: true,
-    followSymbolicLinks: false,
-    dot: false,
-    ignore: allIgnore,
-  });
-  // Filter hidden files/folders
-  const files = allFiles.filter(file => {
-    const parts = file.split("/");
-    return !parts.some(part => part.startsWith("."));
-  });
+  const files = await listCollectionFiles(collectionPath, globPattern, options?.ignorePatterns);
 
   const total = files.length;
   let indexed = 0, updated = 0, unchanged = 0, processed = 0;

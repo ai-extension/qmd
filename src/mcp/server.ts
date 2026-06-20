@@ -326,6 +326,12 @@ Intent-aware lex (C++ performance, not sports):
       // Use default collections if none specified
       const effectiveCollections = collections ?? defaultCollectionNames;
 
+      // Auto-update watched collections in scope before searching. Semantic
+      // sub-queries (vec/hyde) also need fresh embeddings; pure lex does not.
+      // Scope follows the request's `collections` filter (or all watched).
+      const needsEmbed = searches.some(s => s.type !== 'lex');
+      await store.autoFreshForRead(collections, { embed: needsEmbed });
+
       const results = await store.search({
         queries,
         collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
@@ -710,7 +716,13 @@ export async function startMcpHttpServer(
         }));
 
         // Use default collections if none specified
-        const effectiveCollections = Array.isArray(params.collections) ? params.collections.map(String) : defaultCollectionNames;
+        const requestedCollections = Array.isArray(params.collections) ? params.collections.map(String) : undefined;
+        const effectiveCollections = requestedCollections ?? defaultCollectionNames;
+
+        // Auto-update watched collections in scope before searching (semantic
+        // sub-queries also re-embed). Scope follows the request's filter.
+        const needsEmbed = searches.some((s) => s.type !== 'lex');
+        await store.autoFreshForRead(requestedCollections, { embed: needsEmbed });
 
         const results = await store.search({
           queries,

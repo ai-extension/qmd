@@ -6,10 +6,18 @@
 
 - `qmd update` now accepts `-c/--collection <name>` to re-index only the named
   collection(s) instead of all of them (repeatable, e.g. `-c notes -c docs`).
-  Omitting `-c` keeps the existing behavior of updating every collection. Added
-  `-e/--embed` to generate embeddings for the just-updated collection(s) in the
-  same run (incremental; reuses the standard embed path and skips content that
-  already has vectors).
+  Omitting `-c` keeps the existing behavior of updating every collection. Use
+  `qmd embed -c <name>` afterwards to refresh embeddings for that collection.
+- Auto-update on read for collections marked `watch: true`. Mark a collection
+  with `qmd collection watch <name>` / `qmd collection add … --watch` (and
+  `qmd collection unwatch <name>` to disable). When a watched collection is read,
+  the index is refreshed just-in-time in the same process — no background daemon:
+  `qmd search` re-indexes (FTS) first; `qmd query`/`qmd vsearch` also re-embed
+  changed content. Scope follows the read's `-c` filter (only the queried watched
+  collection is refreshed, not every watched one) or all watched collections when
+  unscoped. A stat-only fingerprint skips the work when nothing changed, and the
+  MCP `query` tool / REST `/query` endpoint do the same auto-update. Failures
+  degrade gracefully: the read proceeds on the existing index.
 
 ### Documentation
 

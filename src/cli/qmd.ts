@@ -658,7 +658,7 @@ async function showStatus(): Promise<void> {
 }
 
 async function updateCollections(
-  opts?: { collections?: string[]; embed?: boolean }
+  opts?: { collections?: string[] }
 ): Promise<void> {
   const db = getDb();
   const storeInstance = getStore();
@@ -752,27 +752,10 @@ async function updateCollections(
 
   // Check if any documents need embedding (show once at end)
   const needsEmbedding = getHashesNeedingEmbedding(db);
-  const updatedCollectionNames = collections.map(col => col.name);
   closeDb();
 
   console.log(`${c.green}✓ All collections updated.${c.reset}`);
-
-  if (opts?.embed) {
-    // -e/--embed: re-embed the just-updated collection(s) incrementally, reusing
-    // the standard embed path. vectorIndex re-opens the store (closed above),
-    // skips hashes that already have vectors, and reports "already embedded"
-    // per collection when there is nothing to do. Mirror the embed command's
-    // error handling so a failed embed exits cleanly instead of crashing the
-    // process after the re-index already succeeded.
-    try {
-      for (const name of updatedCollectionNames) {
-        console.log(`\n${c.bold}Embedding ${name}...${c.reset}`);
-        await vectorIndex(resolveEmbedModelForCli(), false, { collection: name });
-      }
-    } catch (error) {
-      exitWithError(error);
-    }
-  } else if (needsEmbedding > 0) {
+  if (needsEmbedding > 0) {
     console.log(`\nRun 'qmd embed' to update embeddings (${needsEmbedding} unique hashes need vectors)`);
   }
 }
@@ -1714,7 +1697,7 @@ function collectionList(): void {
   closeDb();
 }
 
-async function collectionAdd(pwd: string, globPattern: string, name?: string): Promise<void> {
+async function collectionAdd(pwd: string, globPattern: string, name?: string): Promise<string> {
   // If name not provided, generate from pwd basename
   let collName = name;
   if (!collName) {
@@ -1752,6 +1735,7 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
   const newColl = getCollectionFromYaml(collName);
   await indexFiles(pwd, globPattern, collName, false, newColl?.ignore);
   console.log(`${c.green}✓${c.reset} Collection '${collName}' created successfully`);
+  return collName;
 }
 
 function collectionRemove(name: string): void {
@@ -2887,6 +2871,7 @@ function parseCLI() {
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
+      watch: { type: "boolean" },  // collection add --watch: enable auto-update on read
       // Embed options
       force: { type: "boolean", short: "f" },
       "max-docs-per-batch": { type: "string" },
@@ -2894,7 +2879,6 @@ function parseCLI() {
       // Update options
       pull: { type: "boolean" },  // git pull before update
       refresh: { type: "boolean" },
-      embed: { type: "boolean", short: "e" },  // qmd update: re-embed updated collection(s) after re-indexing
       // Get options
       l: { type: "string" },  // max lines
       from: { type: "string" },  // start line
@@ -3425,7 +3409,7 @@ function showHelp(): void {
   console.log("Maintenance:");
   console.log("  qmd init                      - Create a project-local .qmd index");
   console.log("  qmd status                    - View index + collection health");
-  console.log("  qmd update [--pull] [-c <name>] [-e]  - Re-index collections (-c: only named collection(s); -e: embed them too)");
+  console.log("  qmd update [--pull] [-c <name>]  - Re-index collections (-c: only named collection(s))");
   console.log("  qmd embed [-f] [-c <name>]    - Generate/refresh vector embeddings");
   console.log("    --max-docs-per-batch <n>    - Cap docs loaded into memory per embedding batch");
   console.log("    --max-batch-mb <n>          - Cap UTF-8 MB loaded into memory per embedding batch");
@@ -4282,7 +4266,12 @@ if (isMain) {
           const globPattern = cli.values.mask as string || DEFAULT_GLOB;
           const name = cli.values.name as string | undefined;
 
-          await collectionAdd(resolvedPwd, globPattern, name);
+          const addedName = await collectionAdd(resolvedPwd, globPattern, name);
+          if (cli.values.watch) {
+            const { updateCollectionSettings } = await import("../collections.js");
+            updateCollectionSettings(addedName, { watch: true });
+            console.log(`  Watch enabled — search/query will auto-update '${addedName}' when files change`);
+          }
           break;
         }
 
@@ -4353,6 +4342,30 @@ if (isMain) {
           break;
         }
 
+        case "watch":
+        case "unwatch": {
+          const name = cli.args[1];
+          if (!name) {
+            console.error(`Usage: qmd collection ${subcommand} <name>`);
+            console.error(`  ${subcommand === 'watch' ? 'Enable' : 'Disable'} auto re-index on read when files change`);
+            process.exit(1);
+          }
+          const { updateCollectionSettings, getCollection } = await import("../collections.js");
+          const col = getCollection(name);
+          if (!col) {
+            console.error(`Collection not found: ${name}`);
+            process.exit(1);
+          }
+          const watch = subcommand === 'watch';
+          updateCollectionSettings(name, { watch });
+          if (watch) {
+            console.log(`✓ Collection '${name}' will auto-update on read (search re-indexes; query/vsearch also re-embed)`);
+          } else {
+            console.log(`✓ Collection '${name}' will no longer auto-update on read`);
+          }
+          break;
+        }
+
         case "show":
         case "info": {
           const name = cli.args[1];
@@ -4370,6 +4383,7 @@ if (isMain) {
           console.log(`  Path:     ${col.path}`);
           console.log(`  Pattern:  ${col.pattern}`);
           console.log(`  Include:  ${col.includeByDefault !== false ? 'yes (default)' : 'no'}`);
+          console.log(`  Watch:    ${col.watch === true ? 'yes (auto-update on read)' : 'no'}`);
           if (col.update) {
             console.log(`  Update:   ${col.update}`);
           }
@@ -4386,18 +4400,21 @@ if (isMain) {
           console.log("");
           console.log("Commands:");
           console.log("  list                      List all collections");
-          console.log("  add <path> [--name NAME]  Add a collection");
+          console.log("  add <path> [--name NAME] [--watch]  Add a collection (--watch: auto-update on read)");
           console.log("  remove <name>             Remove a collection");
           console.log("  rename <old> <new>        Rename a collection");
           console.log("  show <name>               Show collection details");
           console.log("  update-cmd <name> [cmd]   Set pre-update command (e.g., 'git pull')");
           console.log("  include <name>            Include in default queries");
           console.log("  exclude <name>            Exclude from default queries");
+          console.log("  watch <name>              Auto-update on read (search re-indexes; query/vsearch re-embed)");
+          console.log("  unwatch <name>            Disable auto-update on read");
           console.log("");
           console.log("Examples:");
           console.log("  qmd collection add ~/notes --name notes");
           console.log("  qmd collection update-cmd brain 'git pull'");
           console.log("  qmd collection exclude archive");
+          console.log("  qmd collection watch notes");
           process.exit(0);
         }
 
@@ -4430,10 +4447,7 @@ if (isMain) {
       // -c restricts the update to specific collection(s); empty/omitted updates all.
       // resolveCollectionFilter validates names and exits with "Collection not found" on typo.
       const updateCollectionFilter = resolveCollectionFilter(cli.opts.collection, false);
-      await updateCollections({
-        collections: updateCollectionFilter,
-        embed: !!cli.values.embed,
-      });
+      await updateCollections({ collections: updateCollectionFilter });
       break;
     }
 
@@ -4480,16 +4494,21 @@ if (isMain) {
       break;
     }
 
-    case "search":
+    case "search": {
       if (!cli.query) {
         console.error("Usage: qmd search [options] <query>");
         process.exit(1);
       }
+      // Auto-update watched collections (FTS only — keyword search needs no model)
+      // before searching, on the same store search() will reuse.
+      const { autoFreshForRead } = await import("../freshness.js");
+      await autoFreshForRead(getStore(), cli.opts.collection, { embed: false });
       search(cli.query, cli.opts);
       break;
+    }
 
     case "vsearch":
-    case "vector-search": // undocumented alias
+    case "vector-search": { // undocumented alias
       if (!cli.query) {
         console.error("Usage: qmd vsearch [options] <query>");
         process.exit(1);
@@ -4498,17 +4517,25 @@ if (isMain) {
       if (!cli.values["min-score"]) {
         cli.opts.minScore = 0.3;
       }
+      // Semantic search: also re-embed changed content in watched collections.
+      const { autoFreshForRead } = await import("../freshness.js");
+      await autoFreshForRead(getStore(), cli.opts.collection, { embed: true });
       await vectorSearch(cli.query, cli.opts);
       break;
+    }
 
     case "query":
-    case "deep-search": // undocumented alias
+    case "deep-search": { // undocumented alias
       if (!cli.query) {
         console.error("Usage: qmd query [options] <query>");
         process.exit(1);
       }
+      // Semantic search: also re-embed changed content in watched collections.
+      const { autoFreshForRead } = await import("../freshness.js");
+      await autoFreshForRead(getStore(), cli.opts.collection, { embed: true });
       await querySearch(cli.query, cli.opts);
       break;
+    }
 
     case "bench": {
       const fixturePath = cli.args[0];

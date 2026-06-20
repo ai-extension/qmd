@@ -299,6 +299,18 @@ export interface QMDStore {
     onProgress?: (info: EmbedProgress) => void;
   }): Promise<EmbedResult>;
 
+  /**
+   * Auto-update the `watch: true` collections relevant to a read before it runs.
+   * Scopes to `requestedCollections` (the read's collection filter) intersected
+   * with watched collections, or all watched ones when no filter is given. Uses
+   * a stat-only fingerprint to skip work when nothing changed, and only embeds
+   * when `embed` is true. Failures are swallowed so the read still proceeds.
+   */
+  autoFreshForRead(
+    requestedCollections: string[] | undefined,
+    opts: { embed: boolean },
+  ): Promise<void>;
+
   // ── Index Health ────────────────────────────────────────────────────
 
   /** Get index status (document counts, collections, embedding state) */
@@ -527,6 +539,11 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
         chunkStrategy: embedOpts?.chunkStrategy,
         onProgress: embedOpts?.onProgress,
       });
+    },
+
+    autoFreshForRead: async (requestedCollections, opts) => {
+      const { autoFreshForRead } = await import("./freshness.js");
+      await autoFreshForRead(internal, requestedCollections, opts);
     },
 
     // Index Health
