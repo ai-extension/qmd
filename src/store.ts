@@ -1054,6 +1054,10 @@ export function upsertStoreCollection(db: Database, name: string, collection: Om
 
 export function deleteStoreCollection(db: Database, name: string): boolean {
   const result = db.prepare(`DELETE FROM store_collections WHERE name = ?`).run(name);
+  // Drop the collection's freshness fingerprint (watch auto-update) so no stale
+  // store_config row lingers. Done at this low level so both the CLI and SDK
+  // removal paths are covered.
+  db.prepare(`DELETE FROM store_config WHERE key = ?`).run(`${FRESHNESS_KEY_PREFIX}${name}`);
   return result.changes > 0;
 }
 
@@ -1065,6 +1069,15 @@ export function renameStoreCollection(db: Database, oldName: string, newName: st
   }
 
   const result = db.prepare(`UPDATE store_collections SET name = ? WHERE name = ?`).run(newName, oldName);
+
+  // Migrate the freshness fingerprint (watch auto-update) to the new name so the
+  // next read does not needlessly re-index. Clear any stale target key first to
+  // avoid a store_config PRIMARY KEY collision. Done at this low level so both
+  // the CLI and SDK rename paths are covered.
+  db.prepare(`DELETE FROM store_config WHERE key = ?`).run(`${FRESHNESS_KEY_PREFIX}${newName}`);
+  db.prepare(`UPDATE store_config SET key = ? WHERE key = ?`)
+    .run(`${FRESHNESS_KEY_PREFIX}${newName}`, `${FRESHNESS_KEY_PREFIX}${oldName}`);
+
   return result.changes > 0;
 }
 
@@ -3100,11 +3113,8 @@ export function removeCollection(db: Database, collectionName: string): { delete
     WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
   `).run();
 
-  // Remove from store_collections
+  // Remove from store_collections (also clears the freshness fingerprint).
   deleteStoreCollection(db, collectionName);
-
-  // Drop the collection's freshness fingerprint so no stale store_config row lingers.
-  db.prepare(`DELETE FROM store_config WHERE key = ?`).run(`${FRESHNESS_KEY_PREFIX}${collectionName}`);
 
   return {
     deletedDocs: docResult.changes,
@@ -3121,13 +3131,8 @@ export function renameCollection(db: Database, oldName: string, newName: string)
   db.prepare(`UPDATE documents SET collection = ? WHERE collection = ?`)
     .run(newName, oldName);
 
-  // Rename in store_collections
+  // Rename in store_collections (also migrates the freshness fingerprint).
   renameStoreCollection(db, oldName, newName);
-
-  // Migrate the freshness fingerprint to the new name so the next read does not
-  // needlessly re-index a collection whose files did not actually change.
-  db.prepare(`UPDATE store_config SET key = ? WHERE key = ?`)
-    .run(`${FRESHNESS_KEY_PREFIX}${newName}`, `${FRESHNESS_KEY_PREFIX}${oldName}`);
 }
 
 // =============================================================================

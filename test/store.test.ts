@@ -48,8 +48,8 @@ import {
   isDocid,
   syncConfigToDb,
   reindexCollection,
-  renameCollection,
-  removeCollection,
+  renameStoreCollection,
+  deleteStoreCollection,
   FRESHNESS_KEY_PREFIX,
   STRONG_SIGNAL_MIN_SCORE,
   STRONG_SIGNAL_MIN_GAP,
@@ -492,31 +492,42 @@ describe("Store Creation", () => {
 // =============================================================================
 
 describe("Freshness fingerprint lifecycle", () => {
-  test("renameCollection migrates the freshness fingerprint key (no needless re-index)", async () => {
+  const readKey = (store: Store, key: string) =>
+    (store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(key) as { value?: string } | undefined)?.value;
+
+  // renameStoreCollection / deleteStoreCollection are the low-level ops BOTH the
+  // CLI and the SDK route through, so testing them here covers both paths.
+  test("renameStoreCollection migrates the freshness fingerprint key (no needless re-index)", async () => {
     const store = await createTestStore();
-    const oldKey = `${FRESHNESS_KEY_PREFIX}old`;
-    const newKey = `${FRESHNESS_KEY_PREFIX}new`;
-    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(oldKey, "fp-123");
+    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(`${FRESHNESS_KEY_PREFIX}old`, "fp-123");
 
-    renameCollection(store.db, "old", "new");
+    renameStoreCollection(store.db, "old", "new");
 
-    const oldRow = store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(oldKey) as { value?: string } | undefined;
-    const newRow = store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(newKey) as { value?: string } | undefined;
-    expect(oldRow).toBeUndefined();        // old key gone (no orphan)
-    expect(newRow?.value).toBe("fp-123");  // value carried over → next read skips re-index
+    expect(readKey(store, `${FRESHNESS_KEY_PREFIX}old`)).toBeUndefined();   // no orphan
+    expect(readKey(store, `${FRESHNESS_KEY_PREFIX}new`)).toBe("fp-123");    // carried over
 
     await cleanupTestDb(store);
   });
 
-  test("removeCollection clears the freshness fingerprint key (no orphan)", async () => {
+  test("renameStoreCollection survives a pre-existing target freshness key (no PRIMARY KEY crash)", async () => {
     const store = await createTestStore();
-    const key = `${FRESHNESS_KEY_PREFIX}gone`;
-    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(key, "fp-456");
+    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(`${FRESHNESS_KEY_PREFIX}old`, "fp-old");
+    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(`${FRESHNESS_KEY_PREFIX}new`, "fp-stale");
 
-    removeCollection(store.db, "gone");
+    expect(() => renameStoreCollection(store.db, "old", "new")).not.toThrow();
+    expect(readKey(store, `${FRESHNESS_KEY_PREFIX}new`)).toBe("fp-old");    // migrated value wins
+    expect(readKey(store, `${FRESHNESS_KEY_PREFIX}old`)).toBeUndefined();
 
-    const row = store.db.prepare(`SELECT value FROM store_config WHERE key = ?`).get(key) as { value?: string } | undefined;
-    expect(row).toBeUndefined();
+    await cleanupTestDb(store);
+  });
+
+  test("deleteStoreCollection clears the freshness fingerprint key (no orphan)", async () => {
+    const store = await createTestStore();
+    store.db.prepare(`INSERT INTO store_config (key, value) VALUES (?, ?)`).run(`${FRESHNESS_KEY_PREFIX}gone`, "fp-456");
+
+    deleteStoreCollection(store.db, "gone");
+
+    expect(readKey(store, `${FRESHNESS_KEY_PREFIX}gone`)).toBeUndefined();
 
     await cleanupTestDb(store);
   });
