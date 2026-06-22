@@ -3552,6 +3552,39 @@ describe("Embedding batching", () => {
     }
   });
 
+  test("hybridQuery skipExpansion skips expandQuery but still runs the original query", async () => {
+    const store = await createTestStore();
+    const model = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf";
+    const embedBatchSpy = vi.fn(async (texts: string[]) => texts.map(() => ({
+      embedding: [1, 2, 3],
+      model,
+    })));
+    const searchVecSpy = vi.fn(async () => [] as SearchResult[]) as any;
+    const expandSpy = vi.fn(async () => [{ type: "lex", query: "should not run" }]) as any;
+
+    store.db.exec(`CREATE TABLE vectors_vec (hash_seq TEXT PRIMARY KEY, embedding BLOB)`);
+    store.llm = {
+      embedModelName: model,
+      embedBatch: embedBatchSpy,
+    } as any;
+    store.searchVec = searchVecSpy as any;
+    store.searchFTS = vi.fn(() => []) as any;
+    store.expandQuery = expandSpy;
+
+    try {
+      await hybridQuery(store, "hybrid query", { limit: 5, minScore: 0, skipRerank: true, skipExpansion: true });
+
+      // No LLM expansion at all.
+      expect(expandSpy).not.toHaveBeenCalled();
+      // Original-query vector path still runs (single embed for the original query only).
+      expect(embedBatchSpy).toHaveBeenCalledTimes(1);
+      expect(searchVecSpy).toHaveBeenCalledTimes(1);
+      expect(searchVecSpy.mock.calls[0]?.[0]).toBe("hybrid query");
+    } finally {
+      await cleanupTestDb(store);
+    }
+  });
+
   test("structuredSearch uses the active llm embed model for precomputed vector lookups", async () => {
     const store = await createTestStore();
     const model = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf";

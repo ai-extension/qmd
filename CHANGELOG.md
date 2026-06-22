@@ -2,8 +2,20 @@
 
 ## [Unreleased]
 
+## [2.5.5] - 2026-06-22
+
+This is the first release of `@deeair/qmd`, a customized fork of
+[tobi/qmd](https://github.com/tobi/qmd). Auto-update on read (`watch`) now also
+covers `get`/`multi-get`, and `qmd query` gains `--no-expansion` to skip LLM
+query expansion.
+
 ### Added
 
+- `qmd query --no-expansion` skips the LLM query-expansion step and searches on
+  the original query only (original BM25 + original vector + RRF + rerank). Pair
+  with `--no-rerank` for a fully LLM-free hybrid query. Strong-signal bypass and
+  structured queries (`lex:`/`vec:`/`hyde:`) are unaffected — they already skip
+  auto-expansion.
 - `qmd update` now accepts `-c/--collection <name>` to re-index only the named
   collection(s) instead of all of them (repeatable, e.g. `-c notes -c docs`).
   Omitting `-c` keeps the existing behavior of updating every collection. Use

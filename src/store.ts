@@ -4562,6 +4562,7 @@ export interface HybridQueryOptions {
   explain?: boolean;        // include backend/RRF/rerank score traces
   intent?: string;          // domain intent hint for disambiguation
   skipRerank?: boolean;     // skip LLM reranking, use only RRF scores
+  skipExpansion?: boolean;  // skip LLM query expansion (original BM25+vector only)
   chunkStrategy?: ChunkStrategy;
   hooks?: SearchHooks;
 }
@@ -4625,6 +4626,7 @@ export async function hybridQuery(
   const explain = options?.explain ?? false;
   const intent = options?.intent;
   const skipRerank = options?.skipRerank ?? false;
+  const skipExpansion = options?.skipExpansion ?? false;
   const hooks = options?.hooks;
 
   const rankedLists: RankedResult[][] = [];
@@ -4648,14 +4650,18 @@ export async function hybridQuery(
 
   if (hasStrongSignal) hooks?.onStrongSignal?.(topScore);
 
-  // Step 2: Expand query (or skip if strong signal)
-  hooks?.onExpandStart?.();
-  const expandStart = Date.now();
-  const expanded = hasStrongSignal
-    ? []
-    : await store.expandQuery(query, undefined, intent);
-
-  hooks?.onExpand?.(query, expanded, Date.now() - expandStart);
+  // Step 2: Expand query (skipped on strong BM25 signal or when the caller
+  // opted out via skipExpansion — then search runs on the original query only:
+  // original FTS + original vector search, no LLM expansion).
+  let expanded: ExpandedQuery[] = [];
+  if (!skipExpansion) {
+    hooks?.onExpandStart?.();
+    const expandStart = Date.now();
+    expanded = hasStrongSignal
+      ? []
+      : await store.expandQuery(query, undefined, intent);
+    hooks?.onExpand?.(query, expanded, Date.now() - expandStart);
+  }
 
   // Seed with initial FTS results (avoid re-running original query FTS)
   if (initialFts.length > 0) {

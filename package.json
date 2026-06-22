@@ -1,7 +1,7 @@
 {
   "name": "@deeair/qmd",
-  "version": "2.5.4",
-  "description": "Query Markup Documents - On-device hybrid search for markdown files with BM25, vector search, and LLM reranking",
+  "version": "2.5.5",
+  "description": "Query Markup Documents - On-device hybrid search for markdown files with BM25, vector search, and LLM reranking. Customized fork of tobi/qmd.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -49,11 +49,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tobi/qmd.git"
+    "url": "git+https://github.com/ai-extension/qmd.git"
   },
-  "homepage": "https://github.com/tobi/qmd#readme",
+  "homepage": "https://github.com/ai-extension/qmd#readme",
   "bugs": {
-    "url": "https://github.com/tobi/qmd/issues"
+    "url": "https://github.com/ai-extension/qmd/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -118,5 +118,8 @@
     "llm"
   ],
   "author": "Tobi Lutke <tobi@lutke.com>",
+  "contributors": [
+    "Dee <d3.nguyen@air-closet.com> (customized fork: @deeair/qmd)"
+  ],
   "license": "MIT"
 }

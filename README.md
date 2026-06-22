@@ -1,5 +1,13 @@
 # QMD - Query Markup Documents
 
+> **Note:** This package (`@deeair/qmd`) is a **customized fork of
+> [tobi/qmd](https://github.com/tobi/qmd)**. It tracks the original project and
+> adds local changes (e.g. auto-update on read for `get`/`multi-get`, the
+> `qmd query --no-expansion` flag). All credit for the original design and
+> implementation goes to [Tobi Lütke](https://github.com/tobi) and the upstream
+> contributors. Published under the `@deeair` npm scope; see the
+> [CHANGELOG](CHANGELOG.md) for fork-specific changes.
+
 An on-device search engine for everything you need to remember. Index your markdown notes, meeting transcripts, documentation, and knowledge bases. Search with keywords or natural language. Ideal for your agentic flows.
 
 QMD combines BM25 full-text search, vector semantic search, and LLM re-ranking—all running locally via node-llama-cpp with GGUF models.
@@ -617,9 +625,15 @@ qmd collection unwatch notes    # disable
 
 - **`qmd search`** (keyword/BM25) re-indexes the changed files first — no model needed.
 - **`qmd query` / `qmd vsearch`** (semantic) also re-embed changed content.
-- **Scope follows the read's `-c` filter:** `qmd query -c notes` refreshes only
-  `notes`; an unscoped read refreshes every watched collection. Collections
-  without `watch: true` are never auto-updated (use `qmd update` manually).
+- **`qmd get` / `qmd multi-get`** also auto-update before returning a document,
+  so a freshly edited watched file is never served stale. They use FTS-only
+  re-indexing (no embedding model) and refresh **all** watched collections
+  (these commands resolve documents across every collection, so they ignore
+  `-c` for refresh scope).
+- **Scope follows the read's `-c` filter** (for `search`/`vsearch`/`query`):
+  `qmd query -c notes` refreshes only `notes`; an unscoped read refreshes every
+  watched collection. Collections without `watch: true` are never auto-updated
+  (use `qmd update` manually).
 - **Cheap when nothing changed:** a stat-only `mtime`+`size` stamp per file
   skips the whole re-index when nothing changed, and re-reads only the files
   that actually changed otherwise.
@@ -727,6 +741,8 @@ and `deep-search` (→ `query`).
 --index <name>     # Use named index
 --intent "<text>"  # Disambiguation context (e.g. "web page load times")
 --no-rerank        # Skip LLM reranking (RRF scores only; faster on CPU)
+--no-expansion     # (query) Skip LLM query expansion — original BM25+vector only;
+                   #   pair with --no-rerank for a fully LLM-free hybrid query
 -C, --candidate-limit <n>  # Max candidates to rerank (default: 40)
 --full-path        # Emit on-disk filesystem paths instead of qmd:// URIs
 

@@ -2131,6 +2131,7 @@ type OutputOptions = {
   candidateLimit?: number;  // Max candidates to rerank (default: 40)
   intent?: string;       // Domain intent for disambiguation
   skipRerank?: boolean;  // Skip LLM reranking, use RRF scores only
+  skipExpansion?: boolean;  // Skip LLM query expansion (query: original BM25+vector only)
   chunkStrategy?: ChunkStrategy;  // "auto" (default) or "regex"
   fullPath?: boolean;    // Show realpath instead of qmd:// URI (relative to $PWD when subpath)
 };
@@ -2767,6 +2768,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         minScore: opts.minScore || 0,
         candidateLimit: opts.candidateLimit,
         skipRerank: opts.skipRerank,
+        skipExpansion: opts.skipExpansion,
         explain: !!opts.explain,
         intent,
         chunkStrategy: opts.chunkStrategy,
@@ -2889,6 +2891,7 @@ function parseCLI() {
       // Query options
       "candidate-limit": { type: "string", short: "C" },
       "no-rerank": { type: "boolean", default: false },
+      "no-expansion": { type: "boolean", default: false },  // query: skip LLM query expansion
       "no-gpu": { type: "boolean", default: false },
       intent: { type: "string" },
       // Chunking options
@@ -2959,6 +2962,7 @@ function parseCLI() {
     lineNumbers: !!values["line-numbers"],
     candidateLimit: values["candidate-limit"] ? parseInt(String(values["candidate-limit"]), 10) : undefined,
     skipRerank: !!values["no-rerank"],
+    skipExpansion: !!values["no-expansion"],
     explain: !!values.explain,
     intent: values.intent as string | undefined,
     chunkStrategy: parseChunkStrategy(values["chunk-strategy"]),
@@ -3468,6 +3472,7 @@ function showHelp(): void {
   console.log("  --full                     - Output full document instead of snippet");
   console.log("  -C, --candidate-limit <n>  - Max candidates to rerank (default 40, lower = faster)");
   console.log("  --no-rerank                - Skip LLM reranking (use RRF scores only, much faster on CPU)");
+  console.log("  --no-expansion             - Skip LLM query expansion (query: original BM25+vector only, faster)");
   console.log("  --no-gpu                   - Force CPU mode for llama.cpp operations (same as QMD_FORCE_CPU=1)");
   console.log("  --line-numbers             - Include line numbers (search; get/multi-get are on by default)");
   console.log("  --no-line-numbers          - Disable line numbers for get/multi-get");
@@ -4231,9 +4236,11 @@ if (isMain) {
       const getLineNumbers = !cli.values["no-line-numbers"];
       // Auto-update watched collections so a freshly edited file is not read
       // stale. embed:false — get returns the document body, which re-index
-      // refreshes regardless; no embedding model load is needed.
+      // refreshes regardless; no embedding model load is needed. Scope is all
+      // watched collections (undefined), not `-c`: getDocument resolves the doc
+      // across every collection, so a `-c`-scoped refresh could miss it.
       const { autoFreshForRead } = await import("../freshness.js");
-      await autoFreshForRead(getStore(), cli.opts.collection, { embed: false });
+      await autoFreshForRead(getStore(), undefined, { embed: false });
       getDocument(cli.args[0], fromLine, maxLines, getLineNumbers, !!cli.values["full-path"]);
       break;
     }
@@ -4249,9 +4256,12 @@ if (isMain) {
       // Line numbers default ON for multi-get; opt out with --no-line-numbers.
       const mgLineNumbers = !cli.values["no-line-numbers"];
       // Auto-update watched collections so freshly edited files are not read
-      // stale. embed:false — multi-get returns document bodies only.
+      // stale. embed:false — multi-get returns document bodies only. Scope is
+      // all watched collections (undefined), not `-c`: multiGet matches the
+      // pattern across every collection, so a `-c`-scoped refresh could miss
+      // matches in other collections.
       const { autoFreshForRead } = await import("../freshness.js");
-      await autoFreshForRead(getStore(), cli.opts.collection, { embed: false });
+      await autoFreshForRead(getStore(), undefined, { embed: false });
       multiGet(cli.args[0], maxLinesMulti, maxBytes, cli.opts.format, mgLineNumbers, !!cli.values["full-path"]);
       break;
     }
