@@ -21,6 +21,14 @@
   unaffected — it still re-hashes every file (authoritative). The MCP `query`
   tool / REST `/query` endpoint do the same auto-update. Failures degrade
   gracefully: the read proceeds on the existing index.
+- Auto-update on read now also covers `get` and `multi-get` (CLI and the MCP
+  `get`/`multi_get` tools), so a freshly edited file in a watched collection is no
+  longer returned with stale content. These reads use `embed: false` — they return
+  the document body, which the re-index refreshes regardless, so no embedding model
+  is loaded. CLI `get`/`multi-get` follow the read's `-c` filter; the MCP tools
+  (no collection param) refresh all watched collections. Non-watched collections
+  and unchanged files are untouched (stat-only diff), so the existing read path is
+  unaffected.
 
 ### Documentation
 

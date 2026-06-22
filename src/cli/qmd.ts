@@ -4229,6 +4229,11 @@ if (isMain) {
       const maxLines = cli.values.l ? parseInt(cli.values.l as string, 10) : undefined;
       // Line numbers default ON for get; opt out with --no-line-numbers.
       const getLineNumbers = !cli.values["no-line-numbers"];
+      // Auto-update watched collections so a freshly edited file is not read
+      // stale. embed:false — get returns the document body, which re-index
+      // refreshes regardless; no embedding model load is needed.
+      const { autoFreshForRead } = await import("../freshness.js");
+      await autoFreshForRead(getStore(), cli.opts.collection, { embed: false });
       getDocument(cli.args[0], fromLine, maxLines, getLineNumbers, !!cli.values["full-path"]);
       break;
     }
@@ -4243,6 +4248,10 @@ if (isMain) {
       const maxBytes = cli.values["max-bytes"] ? parseInt(cli.values["max-bytes"] as string, 10) : DEFAULT_MULTI_GET_MAX_BYTES;
       // Line numbers default ON for multi-get; opt out with --no-line-numbers.
       const mgLineNumbers = !cli.values["no-line-numbers"];
+      // Auto-update watched collections so freshly edited files are not read
+      // stale. embed:false — multi-get returns document bodies only.
+      const { autoFreshForRead } = await import("../freshness.js");
+      await autoFreshForRead(getStore(), cli.opts.collection, { embed: false });
       multiGet(cli.args[0], maxLinesMulti, maxBytes, cli.opts.format, mgLineNumbers, !!cli.values["full-path"]);
       break;
     }

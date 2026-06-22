@@ -1110,6 +1110,35 @@ describe("CLI Watch / auto-update on read", () => {
     const afterUpdate = await runQmd(["search", "zzqmdchangedtoken", "--files"], env);
     expect(afterUpdate.stdout).toContain("wcol");
   });
+
+  test("get auto-reindexes a watched collection when the file changes", async () => {
+    const { env, file } = await setupWatchableCollection({ watch: true });
+    await writeFile(file, `# Note\nzzqmdchangedtoken brand new replacement body here\n`);
+    // get returns the body — auto-update refreshes it first, no manual update.
+    const res = await runQmd(["get", "wcol/note.md", "--no-line-numbers"], env);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("zzqmdchangedtoken");
+    expect(res.stdout).not.toContain("zzqmdoriginaltoken");
+  });
+
+  test("get does NOT auto-update a collection without watch", async () => {
+    const { env, file } = await setupWatchableCollection({ watch: false });
+    await writeFile(file, `# Note\nzzqmdchangedtoken brand new replacement body here\n`);
+    // No watch → stale content is still served (old read path unaffected).
+    const res = await runQmd(["get", "wcol/note.md", "--no-line-numbers"], env);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("zzqmdoriginaltoken");
+    expect(res.stdout).not.toContain("zzqmdchangedtoken");
+  });
+
+  test("multi-get auto-reindexes a watched collection when the file changes", async () => {
+    const { env, file } = await setupWatchableCollection({ watch: true });
+    await writeFile(file, `# Note\nzzqmdchangedtoken brand new replacement body here\n`);
+    const res = await runQmd(["multi-get", "wcol/note.md", "--no-line-numbers"], env);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("zzqmdchangedtoken");
+    expect(res.stdout).not.toContain("zzqmdoriginaltoken");
+  });
 });
 
 describe("CLI Add-Context Command", () => {

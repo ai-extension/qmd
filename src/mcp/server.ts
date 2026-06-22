@@ -404,6 +404,11 @@ Intent-aware lex (C++ performance, not sports):
       }
       if (parsedFromLine !== undefined) parsedFromLine = Math.max(1, parsedFromLine);
 
+      // Refresh watched collections before reading so a freshly edited file is
+      // not returned stale. embed:false — get returns the document body, which
+      // re-index updates regardless; no embedding model load is needed.
+      await store.autoFreshForRead(undefined, { embed: false });
+
       const result = await store.get(lookup, { includeBody: false });
 
       if ("error" in result) {
@@ -460,6 +465,10 @@ Intent-aware lex (C++ performance, not sports):
       },
     },
     async ({ pattern, maxLines, maxBytes, lineNumbers }) => {
+      // Refresh watched collections before reading so freshly edited files are
+      // not returned stale. embed:false — multi_get returns document bodies only.
+      await store.autoFreshForRead(undefined, { embed: false });
+
       const { docs, errors } = await store.multiGet(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
 
       if (docs.length === 0 && errors.length === 0) {
