@@ -1,6 +1,6 @@
 {
   "name": "@deeair/qmd",
-  "version": "2.5.5",
+  "version": "2.5.6",
   "description": "Query Markup Documents - On-device hybrid search for markdown files with BM25, vector search, and LLM reranking. Customized fork of tobi/qmd.",
   "type": "module",
   "main": "dist/index.js",
