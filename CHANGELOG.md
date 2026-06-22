@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Performance: `search`, `query`, and `vsearch` no longer re-query the immutable
+  collection list and global context once per result. A request-scoped context
+  resolver loads them once and memoizes per-collection lookups and the
+  document-existence statement, cutting roughly `4N` DB queries per search to a
+  small constant. `qmd search` now reuses the context already resolved during
+  retrieval instead of recomputing it.
+- Performance: `qmd vsearch` batch-embeds the original query plus its expansions
+  in a single `embedBatch()` call (matching `query`) instead of embedding each
+  variant in a separate round-trip; the sqlite-vec lookups stay sequential.
+- Performance: `qmd get` resolves the docid from the hash fetched by the initial
+  document lookup instead of issuing a second query for it.
+
 ## [2.5.5] - 2026-06-22
 
 This is the first release of `@deeair/qmd`, a customized fork of

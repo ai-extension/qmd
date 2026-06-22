@@ -15,7 +15,6 @@ import {
   enableProductionMode,
   searchFTS,
   extractSnippet,
-  getContextForFile,
   getContextForPath,
   listCollections,
   removeCollection,
@@ -1021,7 +1020,7 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
       process.exit(1);
     }
   }
-  let doc: { collectionName: string; path: string; body: string } | null = null;
+  let doc: { collectionName: string; path: string; hash: string; body: string } | null = null;
   let virtualPath: string;
 
   // Handle virtual paths (qmd://collection/path)
@@ -1035,7 +1034,7 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
 
     // Try exact match on collection + path
     doc = db.prepare(`
-      SELECT d.collection as collectionName, d.path, content.doc as body
+      SELECT d.collection as collectionName, d.path, d.hash as hash, content.doc as body
       FROM documents d
       JOIN content ON content.hash = d.hash
       WHERE d.collection = ? AND d.path = ? AND d.active = 1
@@ -1044,7 +1043,7 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
     if (!doc) {
       // Try fuzzy match by path ending
       doc = db.prepare(`
-        SELECT d.collection as collectionName, d.path, content.doc as body
+        SELECT d.collection as collectionName, d.path, d.hash as hash, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.collection = ? AND d.path LIKE ? AND d.active = 1
@@ -1070,21 +1069,21 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
         if (collExists) {
           // Try exact match on collection + path
           doc = db.prepare(`
-            SELECT d.collection as collectionName, d.path, content.doc as body
+            SELECT d.collection as collectionName, d.path, d.hash as hash, content.doc as body
             FROM documents d
             JOIN content ON content.hash = d.hash
             WHERE d.collection = ? AND d.path = ? AND d.active = 1
-          `).get(possibleCollection || "", possiblePath || "") as { collectionName: string; path: string; body: string } | null;
+          `).get(possibleCollection || "", possiblePath || "") as { collectionName: string; path: string; hash: string; body: string } | null;
 
           if (!doc) {
             // Try fuzzy match by path ending
             doc = db.prepare(`
-              SELECT d.collection as collectionName, d.path, content.doc as body
+              SELECT d.collection as collectionName, d.path, d.hash as hash, content.doc as body
               FROM documents d
               JOIN content ON content.hash = d.hash
               WHERE d.collection = ? AND d.path LIKE ? AND d.active = 1
               LIMIT 1
-            `).get(possibleCollection || "", `%${possiblePath}`) as { collectionName: string; path: string; body: string } | null;
+            `).get(possibleCollection || "", `%${possiblePath}`) as { collectionName: string; path: string; hash: string; body: string } | null;
           }
 
           if (doc) {
@@ -1114,23 +1113,23 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
       if (detected) {
         // Found collection - query by collection name + relative path
         doc = db.prepare(`
-          SELECT d.collection as collectionName, d.path, content.doc as body
+          SELECT d.collection as collectionName, d.path, d.hash as hash, content.doc as body
           FROM documents d
           JOIN content ON content.hash = d.hash
           WHERE d.collection = ? AND d.path = ? AND d.active = 1
-        `).get(detected.collectionName, detected.relativePath) as { collectionName: string; path: string; body: string } | null;
+        `).get(detected.collectionName, detected.relativePath) as { collectionName: string; path: string; hash: string; body: string } | null;
       }
 
       // Fuzzy match by filename (last component of path)
       if (!doc) {
         const filename = inputPath.split('/').pop() || inputPath;
         doc = db.prepare(`
-          SELECT d.collection as collectionName, d.path, content.doc as body
+          SELECT d.collection as collectionName, d.path, d.hash as hash, content.doc as body
           FROM documents d
           JOIN content ON content.hash = d.hash
           WHERE d.path LIKE ? AND d.active = 1
           LIMIT 1
-        `).get(`%${filename}`) as { collectionName: string; path: string; body: string } | null;
+        `).get(`%${filename}`) as { collectionName: string; path: string; hash: string; body: string } | null;
       }
 
       if (doc) {
@@ -1151,14 +1150,10 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
   // Get context for this file
   const context = getContextForPath(db, doc.collectionName, doc.path);
 
-  // Resolve the docid (first 6 chars of the content hash) so callers always
-  // know what they retrieved and can cite it back to `get`/`multi-get`.
-  const hashRow = db.prepare(`
-    SELECT d.hash as hash
-    FROM documents d
-    WHERE d.collection = ? AND d.path = ? AND d.active = 1
-  `).get(doc.collectionName, doc.path) as { hash: string } | null;
-  const docid = hashRow?.hash ? hashRow.hash.slice(0, 6) : undefined;
+  // The docid is the first 6 chars of the content hash, already fetched by the
+  // lookup above — so callers always know what they retrieved and can cite it
+  // back to `get`/`multi-get`.
+  const docid = doc.hash ? doc.hash.slice(0, 6) : undefined;
   const canonicalPath = buildVirtualPath(doc.collectionName, doc.path);
 
   // --full-path: show the on-disk path instead of the qmd:// URL + docid, when
@@ -2619,7 +2614,7 @@ function search(query: string, opts: OutputOptions): void {
     title: r.title,
     body: r.body || "",
     score: r.score,
-    context: getContextForFile(db, r.filepath),
+    context: r.context,  // already resolved by searchFTS — no need to recompute
     hash: r.hash,
     docid: r.docid,
   }));

@@ -1215,6 +1215,7 @@ export type Store = {
   // Context
   getContextForFile: (filepath: string) => string | null;
   getContextForPath: (collectionName: string, path: string) => string | null;
+  createContextResolver: () => ContextResolver;
   getCollectionByName: (name: string) => { name: string; pwd: string; glob_pattern: string } | null;
   getCollectionsWithoutContext: () => { name: string; pwd: string; doc_count: number }[];
   getTopLevelPathsWithoutContext: (collectionName: string) => string[];
@@ -1933,6 +1934,7 @@ export function createStore(dbPath?: string): Store {
     // Context
     getContextForFile: (filepath: string) => getContextForFile(db, filepath),
     getContextForPath: (collectionName: string, path: string) => getContextForPath(db, collectionName, path),
+    createContextResolver: () => createContextResolver(db),
     getCollectionByName: (name: string) => getCollectionByName(db, name),
     getCollectionsWithoutContext: () => getCollectionsWithoutContext(db),
     getTopLevelPathsWithoutContext: (collectionName: string) => getTopLevelPathsWithoutContext(db, collectionName),
@@ -2927,43 +2929,129 @@ export function matchFilesByGlob(db: Database, pattern: string): { filepath: str
  * @returns Context string or null if no context is defined
  */
 export function getContextForPath(db: Database, collectionName: string, path: string): string | null {
-  const coll = getStoreCollection(db, collectionName);
+  return createContextResolver(db).forPath(collectionName, path);
+}
 
-  if (!coll) return null;
+/**
+ * Request-scoped resolver for path/file context.
+ *
+ * The collection list and global context are immutable for the duration of a
+ * single search, so they are loaded once and memoized here (along with the
+ * per-name collection lookup and the document-existence prepared statement).
+ *
+ * Callers that resolve context for many results (the search/query result
+ * loops) should create ONE resolver and reuse it across results. Calling the
+ * standalone getContextForFile/getContextForPath helpers per result re-queries
+ * these immutable tables every time (the old N+1 behavior); those helpers now
+ * delegate to a fresh resolver so single-shot callers keep working unchanged.
+ */
+export interface ContextResolver {
+  forFile: (filepath: string) => string | null;
+  forPath: (collectionName: string, path: string) => string | null;
+}
 
-  // Collect ALL matching contexts (global + all path prefixes)
-  const contexts: string[] = [];
+export function createContextResolver(db: Database): ContextResolver {
+  let collections: NamedCollection[] | undefined;
+  let globalCtx: string | undefined;
+  let globalCtxLoaded = false;
+  const collByName = new Map<string, NamedCollection | null>();
+  let verifyStmt: ReturnType<Database["prepare"]> | undefined;
 
-  // Add global context if present
-  const globalCtx = getStoreGlobalContext(db);
-  if (globalCtx) {
-    contexts.push(globalCtx);
-  }
+  const getCollections = (): NamedCollection[] =>
+    (collections ??= getStoreCollections(db));
 
-  // Add all matching path contexts (from most general to most specific)
-  if (coll.context) {
-    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const getGlobalCtx = (): string | undefined => {
+    if (!globalCtxLoaded) {
+      globalCtx = getStoreGlobalContext(db);
+      globalCtxLoaded = true;
+    }
+    return globalCtx;
+  };
 
-    // Collect all matching prefixes
-    const matchingContexts: { prefix: string; context: string }[] = [];
-    for (const [prefix, context] of Object.entries(coll.context)) {
-      const normalizedPrefix = prefix.startsWith("/") ? prefix : `/${prefix}`;
-      if (normalizedPath.startsWith(normalizedPrefix)) {
-        matchingContexts.push({ prefix: normalizedPrefix, context });
+  const getColl = (name: string): NamedCollection | null => {
+    let coll = collByName.get(name);
+    if (coll === undefined) {
+      coll = getStoreCollection(db, name);
+      collByName.set(name, coll);
+    }
+    return coll;
+  };
+
+  // Build the inherited context string (global + matching path prefixes, most
+  // general first) for an already-resolved collection + relative path.
+  const buildContexts = (coll: NamedCollection, relativePath: string): string | null => {
+    const contexts: string[] = [];
+
+    const globalContext = getGlobalCtx();
+    if (globalContext) contexts.push(globalContext);
+
+    if (coll.context) {
+      const normalizedPath = relativePath.startsWith("/") ? relativePath : `/${relativePath}`;
+
+      const matchingContexts: { prefix: string; context: string }[] = [];
+      for (const [prefix, context] of Object.entries(coll.context)) {
+        const normalizedPrefix = prefix.startsWith("/") ? prefix : `/${prefix}`;
+        if (normalizedPath.startsWith(normalizedPrefix)) {
+          matchingContexts.push({ prefix: normalizedPrefix, context });
+        }
       }
+
+      matchingContexts.sort((a, b) => a.prefix.length - b.prefix.length);
+      for (const match of matchingContexts) contexts.push(match.context);
     }
 
-    // Sort by prefix length (shortest/most general first)
-    matchingContexts.sort((a, b) => a.prefix.length - b.prefix.length);
+    return contexts.length > 0 ? contexts.join('\n\n') : null;
+  };
 
-    // Add all matching contexts
-    for (const match of matchingContexts) {
-      contexts.push(match.context);
+  const forPath = (collectionName: string, path: string): string | null => {
+    const coll = getColl(collectionName);
+    if (!coll) return null;
+    return buildContexts(coll, path);
+  };
+
+  const forFile = (filepath: string): string | null => {
+    if (!filepath) return null;
+
+    // Parse virtual path format: qmd://collection/path
+    let collectionName: string | null = null;
+    let relativePath: string | null = null;
+
+    const parsedVirtual = filepath.startsWith('qmd://') ? parseVirtualPath(filepath) : null;
+    if (parsedVirtual) {
+      collectionName = parsedVirtual.collectionName;
+      relativePath = parsedVirtual.path;
+    } else {
+      // Filesystem path: find which collection this absolute path belongs to
+      for (const coll of getCollections()) {
+        if (!coll || !coll.path) continue;
+        if (filepath.startsWith(coll.path + '/') || filepath === coll.path) {
+          collectionName = coll.name;
+          relativePath = filepath.startsWith(coll.path + '/')
+            ? filepath.slice(coll.path.length + 1)
+            : '';
+          break;
+        }
+      }
+      if (!collectionName || relativePath === null) return null;
     }
-  }
 
-  // Join all contexts with double newline
-  return contexts.length > 0 ? contexts.join('\n\n') : null;
+    const coll = getColl(collectionName);
+    if (!coll) return null;
+
+    // Verify this document exists in the database
+    verifyStmt ??= db.prepare(`
+      SELECT d.path
+      FROM documents d
+      WHERE d.collection = ? AND d.path = ? AND d.active = 1
+      LIMIT 1
+    `);
+    const doc = verifyStmt.get(collectionName, relativePath) as { path: string } | null;
+    if (!doc) return null;
+
+    return buildContexts(coll, relativePath);
+  };
+
+  return { forFile, forPath };
 }
 
 /**
@@ -2971,86 +3059,7 @@ export function getContextForPath(db: Database, collectionName: string, path: st
  * Resolves the collection and relative path from the DB store_collections table.
  */
 export function getContextForFile(db: Database, filepath: string): string | null {
-  // Handle undefined or null filepath
-  if (!filepath) return null;
-
-  // Get all collections from DB
-  const collections = getStoreCollections(db);
-
-  // Parse virtual path format: qmd://collection/path
-  let collectionName: string | null = null;
-  let relativePath: string | null = null;
-
-  const parsedVirtual = filepath.startsWith('qmd://') ? parseVirtualPath(filepath) : null;
-  if (parsedVirtual) {
-    collectionName = parsedVirtual.collectionName;
-    relativePath = parsedVirtual.path;
-  } else {
-    // Filesystem path: find which collection this absolute path belongs to
-    for (const coll of collections) {
-      // Skip collections with missing paths
-      if (!coll || !coll.path) continue;
-
-      if (filepath.startsWith(coll.path + '/') || filepath === coll.path) {
-        collectionName = coll.name;
-        // Extract relative path
-        relativePath = filepath.startsWith(coll.path + '/')
-          ? filepath.slice(coll.path.length + 1)
-          : '';
-        break;
-      }
-    }
-
-    if (!collectionName || relativePath === null) return null;
-  }
-
-  // Get the collection from DB
-  const coll = getStoreCollection(db, collectionName);
-  if (!coll) return null;
-
-  // Verify this document exists in the database
-  const doc = db.prepare(`
-    SELECT d.path
-    FROM documents d
-    WHERE d.collection = ? AND d.path = ? AND d.active = 1
-    LIMIT 1
-  `).get(collectionName, relativePath) as { path: string } | null;
-
-  if (!doc) return null;
-
-  // Collect ALL matching contexts (global + all path prefixes)
-  const contexts: string[] = [];
-
-  // Add global context if present
-  const globalCtx = getStoreGlobalContext(db);
-  if (globalCtx) {
-    contexts.push(globalCtx);
-  }
-
-  // Add all matching path contexts (from most general to most specific)
-  if (coll.context) {
-    const normalizedPath = relativePath.startsWith("/") ? relativePath : `/${relativePath}`;
-
-    // Collect all matching prefixes
-    const matchingContexts: { prefix: string; context: string }[] = [];
-    for (const [prefix, context] of Object.entries(coll.context)) {
-      const normalizedPrefix = prefix.startsWith("/") ? prefix : `/${prefix}`;
-      if (normalizedPath.startsWith(normalizedPrefix)) {
-        matchingContexts.push({ prefix: normalizedPrefix, context });
-      }
-    }
-
-    // Sort by prefix length (shortest/most general first)
-    matchingContexts.sort((a, b) => a.prefix.length - b.prefix.length);
-
-    // Add all matching contexts
-    for (const match of matchingContexts) {
-      contexts.push(match.context);
-    }
-  }
-
-  // Join all contexts with double newline
-  return contexts.length > 0 ? contexts.join('\n\n') : null;
+  return createContextResolver(db).forFile(filepath);
 }
 
 /**
@@ -3556,6 +3565,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[];
+  const ctx = createContextResolver(db);
   return rows.map(row => {
     const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
     // Convert bm25 (negative, lower is better) into a stable [0..1) score where higher is better.
@@ -3573,7 +3583,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
       modifiedAt: "",  // Not available in FTS query
       bodyLength: row.body.length,
       body: row.body,
-      context: getContextForFile(db, row.filepath),
+      context: ctx.forFile(row.filepath),
       score,
       source: "fts" as const,
     };
@@ -3647,6 +3657,7 @@ export async function searchVec(db: Database, query: string, model: string, limi
     }
   }
 
+  const ctx = createContextResolver(db);
   return Array.from(seen.values())
     .sort((a, b) => a.bestDist - b.bestDist)
     .slice(0, limit)
@@ -3662,7 +3673,7 @@ export async function searchVec(db: Database, query: string, model: string, limi
         modifiedAt: "",  // Not available in vec query
         bodyLength: row.body.length,
         body: row.body,
-        context: getContextForFile(db, row.filepath),
+        context: ctx.forFile(row.filepath),
         score: 1 - bestDist,  // Cosine similarity = 1 - cosine distance
         source: "vec" as const,
         chunkPos: row.pos,
@@ -4774,6 +4785,10 @@ export async function hybridQuery(
     docChunkMap.set(cand.file, { chunks, bestIdx });
   }
 
+  // One resolver reused across all results — collections/global context are
+  // immutable for this query, so this avoids re-querying them per result.
+  const ctx = store.createContextResolver();
+
   if (skipRerank) {
     // Skip LLM reranking — return candidates scored by RRF only
     const seenFiles = new Set<string>();
@@ -4810,7 +4825,7 @@ export async function hybridQuery(
           bestChunk,
           bestChunkPos,
           score: rrfScore,
-          context: store.getContextForFile(cand.file),
+          context: ctx.forFile(cand.file),
           docid: docidMap.get(cand.file) || "",
           ...(explainData ? { explain: explainData } : {}),
         };
@@ -4884,7 +4899,7 @@ export async function hybridQuery(
       bestChunk,
       bestChunkPos,
       score: blendedScore,
-      context: store.getContextForFile(r.file),
+      context: ctx.forFile(r.file),
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
@@ -4950,12 +4965,20 @@ export async function vectorSearchQuery(
   const vecExpanded = allExpanded.filter(q => q.type !== 'lex');
   options?.hooks?.onExpand?.(query, vecExpanded, Date.now() - expandStart);
 
-  // Run original + vec/hyde expanded through vector, sequentially — concurrent embed() hangs
-  const embedModel = getLlm(store).embedModelName;
+  // Batch-embed original + vec/hyde expansions in a single call, then run the
+  // sqlite-vec lookups with pre-computed embeddings. The lookups stay sequential
+  // (concurrent embed() hangs — see hybridQuery), but embedding happens once.
+  const llm = getLlm(store);
+  const embedModel = llm.embedModelName;
   const queryTexts = [query, ...vecExpanded.map(q => q.query)];
+  const embeddings = await llm.embedBatch(queryTexts.map(t => formatQueryForEmbedding(t, embedModel)));
+
+  const ctx = store.createContextResolver();
   const allResults = new Map<string, VectorSearchResult>();
-  for (const q of queryTexts) {
-    const vecResults = await store.searchVec(q, embedModel, limit, collection);
+  for (let i = 0; i < queryTexts.length; i++) {
+    const embedding = embeddings[i]?.embedding;
+    if (!embedding) continue;
+    const vecResults = await store.searchVec(queryTexts[i]!, embedModel, limit, collection, undefined, embedding);
     for (const r of vecResults) {
       const existing = allResults.get(r.filepath);
       if (!existing || r.score > existing.score) {
@@ -4965,7 +4988,7 @@ export async function vectorSearchQuery(
           title: r.title,
           body: r.body || "",
           score: r.score,
-          context: store.getContextForFile(r.filepath),
+          context: ctx.forFile(r.filepath),
           docid: r.docid,
         });
       }
@@ -5168,6 +5191,10 @@ export async function structuredSearch(
     docChunkMap.set(cand.file, { chunks, bestIdx });
   }
 
+  // One resolver reused across all results — collections/global context are
+  // immutable for this query, so this avoids re-querying them per result.
+  const ctx = store.createContextResolver();
+
   if (skipRerank) {
     // Skip LLM reranking — return candidates scored by RRF only
     const seenFiles = new Set<string>();
@@ -5204,7 +5231,7 @@ export async function structuredSearch(
           bestChunk,
           bestChunkPos,
           score: rrfScore,
-          context: store.getContextForFile(cand.file),
+          context: ctx.forFile(cand.file),
           docid: docidMap.get(cand.file) || "",
           ...(explainData ? { explain: explainData } : {}),
         };
@@ -5277,7 +5304,7 @@ export async function structuredSearch(
       bestChunk,
       bestChunkPos,
       score: blendedScore,
-      context: store.getContextForFile(r.file),
+      context: ctx.forFile(r.file),
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
