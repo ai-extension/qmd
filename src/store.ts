@@ -4853,8 +4853,9 @@ export async function hybridQuery(
   const reranked = await store.rerank(query, chunksToRerank, undefined, intent);
   hooks?.onRerankDone?.(Date.now() - rerankStart);
 
-  // Step 7: Blend RRF position score with reranker score
-  // Position-aware weights: top retrieval results get more protection from reranker disagreement
+  // Step 7: Order by reranker score (primary), with RRF rank as the tie-breaker.
+  // The reranker judges chunk↔query relevance directly; RRF only disambiguates
+  // near-equal rerank scores (see the sort comparator below).
   const candidateMap = new Map(candidates.map(c => [c.file, {
     displayPath: c.displayPath, title: c.title, body: c.body,
   }]));
@@ -4862,12 +4863,14 @@ export async function hybridQuery(
 
   const blended = reranked.map(r => {
     const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
-    let rrfWeight: number;
-    if (rrfRank <= 3) rrfWeight = 0.75;
-    else if (rrfRank <= 10) rrfWeight = 0.60;
-    else rrfWeight = 0.40;
     const rrfScore = 1 / rrfRank;
-    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
+    // Reranker is the PRIMARY relevance judge; RRF is only a tie-breaker for
+    // near-equal rerank scores (see sort below). The reranker scores chunk↔query
+    // relevance directly, so it must be able to reorder top RRF results — the
+    // old position-protected blend could not (a rank-2 doc needed a >1.5 rerank
+    // lead to overtake rank-1, impossible on a 0-1 scale), which buried the
+    // correct doc (e.g. schedules.md rerank 0.73 lost to user_manual.md 0.50).
+    const blendedScore = r.score;
 
     const candidate = candidateMap.get(r.file);
     const chunkInfo = docChunkMap.get(r.file);
@@ -4881,7 +4884,7 @@ export async function hybridQuery(
       rrf: {
         rank: rrfRank,
         positionScore: rrfScore,
-        weight: rrfWeight,
+        weight: 0,
         baseScore: trace?.baseScore ?? 0,
         topRankBonus: trace?.topRankBonus ?? 0,
         totalScore: trace?.totalScore ?? 0,
@@ -4903,7 +4906,13 @@ export async function hybridQuery(
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
-  }).sort((a, b) => b.score - a.score);
+  }).sort((a, b) => {
+    // Primary: rerank score bucketed to 0.01 so genuinely-close scores tie.
+    const ra = Math.round(a.score * 100), rb = Math.round(b.score * 100);
+    if (rb !== ra) return rb - ra;
+    // Tie-break: original RRF (BM25+vector) rank.
+    return (rrfRankMap.get(a.file) ?? 9999) - (rrfRankMap.get(b.file) ?? 9999);
+  });
 
   // Step 8: Dedup by file (safety net — prevents duplicate output)
   const seenFiles = new Set<string>();
@@ -5259,7 +5268,7 @@ export async function structuredSearch(
   const reranked = await store.rerank(primaryQuery, chunksToRerank, undefined, intent);
   hooks?.onRerankDone?.(Date.now() - rerankStart2);
 
-  // Step 6: Blend RRF position score with reranker score
+  // Step 6: Order by reranker score (primary), RRF rank as tie-breaker.
   const candidateMap = new Map(candidates.map(c => [c.file, {
     displayPath: c.displayPath, title: c.title, body: c.body,
   }]));
@@ -5267,12 +5276,14 @@ export async function structuredSearch(
 
   const blended = reranked.map(r => {
     const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
-    let rrfWeight: number;
-    if (rrfRank <= 3) rrfWeight = 0.75;
-    else if (rrfRank <= 10) rrfWeight = 0.60;
-    else rrfWeight = 0.40;
     const rrfScore = 1 / rrfRank;
-    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
+    // Reranker is the PRIMARY relevance judge; RRF is only a tie-breaker for
+    // near-equal rerank scores (see sort below). The reranker scores chunk↔query
+    // relevance directly, so it must be able to reorder top RRF results — the
+    // old position-protected blend could not (a rank-2 doc needed a >1.5 rerank
+    // lead to overtake rank-1, impossible on a 0-1 scale), which buried the
+    // correct doc (e.g. schedules.md rerank 0.73 lost to user_manual.md 0.50).
+    const blendedScore = r.score;
 
     const candidate = candidateMap.get(r.file);
     const chunkInfo = docChunkMap.get(r.file);
@@ -5286,7 +5297,7 @@ export async function structuredSearch(
       rrf: {
         rank: rrfRank,
         positionScore: rrfScore,
-        weight: rrfWeight,
+        weight: 0,
         baseScore: trace?.baseScore ?? 0,
         topRankBonus: trace?.topRankBonus ?? 0,
         totalScore: trace?.totalScore ?? 0,
@@ -5308,7 +5319,13 @@ export async function structuredSearch(
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
-  }).sort((a, b) => b.score - a.score);
+  }).sort((a, b) => {
+    // Primary: rerank score bucketed to 0.01 so genuinely-close scores tie.
+    const ra = Math.round(a.score * 100), rb = Math.round(b.score * 100);
+    if (rb !== ra) return rb - ra;
+    // Tie-break: original RRF (BM25+vector) rank.
+    return (rrfRankMap.get(a.file) ?? 9999) - (rrfRankMap.get(b.file) ?? 9999);
+  });
 
   // Step 7: Dedup by file
   const seenFiles = new Set<string>();

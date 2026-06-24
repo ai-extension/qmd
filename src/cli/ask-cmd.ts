@@ -12,7 +12,7 @@ import { listGraphs, getGraph } from "../collections.js";
 import { runGraph, GraphNotBuiltError } from "../graph-adapter.js";
 import { withLLMSession } from "../llm.js";
 import { hybridQuery, type Store } from "../store.js";
-import { synthesizeBrief, toDocInput } from "../agent/synthesize.js";
+import { synthesizeBrief, extractBrief, selectBrief, toDocInput } from "../agent/synthesize.js";
 
 interface AskValues {
   graph?: boolean;
@@ -20,6 +20,10 @@ interface AskValues {
   collection?: string | string[];
   json?: boolean;
   n?: string;
+  "no-rerank"?: boolean;
+  "no-expansion"?: boolean;
+  extract?: boolean;
+  select?: boolean;
   [k: string]: unknown;
 }
 
@@ -80,9 +84,15 @@ export async function runAskCommand(
     const results = await hybridQuery(store, question, {
       collection,
       limit,
+      skipRerank: values["no-rerank"] === true,
+      skipExpansion: values["no-expansion"] === true,
     });
-    const docs = results.map((r) => toDocInput(r));
-    return synthesizeBrief({ question, docs, graphText, graphName });
+    // extract = tight window, no model. select/synthesis = wider context.
+    const docs = results.map((r) => toDocInput(r, values.extract ? 600 : 2000));
+    const synthInput = { question, docs, graphText, graphName };
+    if (values.select) return selectBrief(synthInput);   // model picks, verbatim
+    if (values.extract) return extractBrief(synthInput); // no model, verbatim
+    return synthesizeBrief(synthInput);                  // model rewrites
   });
 
   if (values.json) {

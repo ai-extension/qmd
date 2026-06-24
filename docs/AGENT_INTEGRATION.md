@@ -115,6 +115,29 @@ model anchors on the FIRST excerpt. Fixes in `src/agent/synthesize.ts`:
   platform overviews.
 Lesson: garbage-in → garbage-out; fix the content fed before blaming the model.
 
+### `ask` synthesis modes (CLI flags + MCP args)
+- default — model rewrites an abstractive brief (Summary/Sources/Code).
+- `--extract` — NO model: a tight verbatim window (~600 chars) around the matched
+  passage per doc. `toDocInput(r, 600)`.
+- `--select` — model picks the most relevant passages but quotes are VERBATIM:
+  candidates are numbered, the model returns only indices, we re-emit exact source
+  text (`selectBrief` in `src/agent/synthesize.ts`). Best of both.
+- `--no-rerank` / `--no-expansion` — disable retrieval-side LLM (with `--extract`
+  → zero LLM at all).
+All wired in both `src/cli/ask-cmd.ts` and the MCP `ask` tool.
+
+### Rerank blend fix (wrong doc ranked first) — core search
+Symptom: `query/ask "how do schedules work"` ranked the general `user_manual.md`
+(#1, 0.88) above `schedules.md` (#2, 0.56). Diagnosis via `--explain`: the
+reranker was CORRECT (schedules 0.729 > user_manual 0.504) but the old blend
+`0.75·(1/rrfRank) + 0.25·rerank` weighted RRF position so heavily that a rank-2
+doc needed a >1.5 rerank lead to overtake rank-1 — mathematically impossible, so
+rerank could never reorder top RRF results. Fix (`src/store.ts`, both
+`hybridQuery` and `structuredSearch`): **rerank is primary** (`score = rerankScore`),
+**RRF is only a tie-break** for near-equal rerank scores (bucketed to 0.01).
+After: schedules.md #1 (0.73), user_manual.md #4 (0.50). Affects all of
+query/search/ask. (`synthesize.ts orderByTopicMatch` is now a redundant safeguard.)
+
 ## ALL PHASES DONE (P0–P4). Possible follow-ups:
 - Better placement (P3) via retrieval-biased file pick or a larger generate model.
 - `ask --json` already returns {question, brief, usedGraph}; could add structured

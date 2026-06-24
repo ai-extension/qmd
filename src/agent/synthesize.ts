@@ -169,6 +169,91 @@ export async function synthesizeBrief(input: SynthesizeInput): Promise<Brief> {
   };
 }
 
+/**
+ * Extractive brief — NO generation. Cuts and concatenates the relevant excerpts
+ * verbatim (most on-topic doc first) plus any graph output. Zero hallucination,
+ * the synthesis model never runs. Use when fidelity/speed matter more than prose.
+ */
+export function extractBrief(input: SynthesizeInput): Brief {
+  const usedGraph = Boolean(input.graphText && input.graphText.trim());
+  const ordered = orderByTopicMatch(input.question, input.docs);
+  const lines: string[] = [`# ${input.question}`, "", "## Matches"];
+  if (ordered.length === 0) {
+    lines.push("(no documentation matched)");
+  } else {
+    for (const d of ordered) {
+      lines.push("", `### ${d.displayPath}${d.title ? ` — ${d.title}` : ""} (score ${d.score.toFixed(3)})`);
+      lines.push(d.snippet.trim());
+    }
+  }
+  if (usedGraph) {
+    lines.push("", `## Code (${input.graphName ?? "graph"})`, "```", input.graphText!.trim(), "```");
+  }
+  return { question: input.question, brief: lines.join("\n"), usedGraph };
+}
+
+/**
+ * Model-SELECTED extractive brief. The model picks the most relevant passages
+ * but quotes are VERBATIM: candidates are numbered, the model returns only the
+ * indices, and we re-emit the exact source text for those indices — so the
+ * model decides relevance without any chance to paraphrase. Falls back to plain
+ * extraction if the model is unavailable or returns no usable indices.
+ */
+export async function selectBrief(input: SynthesizeInput, maxQuotes = 6): Promise<Brief> {
+  const usedGraph = Boolean(input.graphText && input.graphText.trim());
+  const ordered = orderByTopicMatch(input.question, input.docs);
+
+  // Build numbered candidate passages (paragraph-level), capped for prompt size.
+  const candidates: { path: string; text: string }[] = [];
+  for (const d of ordered) {
+    for (const para of d.snippet.split(/\n\s*\n/)) {
+      const text = para.trim();
+      if (text.length >= 15) candidates.push({ path: d.displayPath, text });
+      if (candidates.length >= 40) break;
+    }
+    if (candidates.length >= 40) break;
+  }
+
+  if (candidates.length === 0) {
+    return { question: input.question, brief: fallbackBrief(input), usedGraph };
+  }
+
+  const numbered = candidates
+    .map((c, i) => `[${i + 1}] (${c.path}) ${c.text.replace(/\s+/g, " ").slice(0, 300)}`)
+    .join("\n");
+  const prompt =
+    "Select the passages that best answer the QUESTION. Reply with ONLY their " +
+    "numbers, most relevant first, comma-separated (e.g. 3, 1, 7). No other text.\n\n" +
+    `QUESTION: ${input.question}\n\nPASSAGES:\n${numbered}`;
+
+  let picks: number[] = [];
+  try {
+    const llm = getDefaultLlamaCpp();
+    const result = await llm.generate(prompt, { maxTokens: 40, temperature: 0 });
+    picks = (result?.text ?? "")
+      .match(/\d+/g)
+      ?.map((n) => parseInt(n, 10))
+      .filter((n) => n >= 1 && n <= candidates.length) ?? [];
+  } catch {
+    /* fall through to fallback below */
+  }
+  // Dedupe preserving order; cap.
+  picks = [...new Set(picks)].slice(0, maxQuotes);
+  if (picks.length === 0) {
+    return { question: input.question, brief: extractBrief(input).brief, usedGraph };
+  }
+
+  const lines: string[] = [`# ${input.question}`, "", "## Relevant excerpts (verbatim, model-selected)"];
+  for (const n of picks) {
+    const c = candidates[n - 1]!;
+    lines.push("", c.text, `— ${c.path}`);
+  }
+  if (usedGraph) {
+    lines.push("", `## Code (${input.graphName ?? "graph"})`, "```", input.graphText!.trim(), "```");
+  }
+  return { question: input.question, brief: lines.join("\n"), usedGraph };
+}
+
 /** Deterministic brief when the LLM can't run — just lists what was found. */
 function fallbackBrief(input: SynthesizeInput): string {
   const lines: string[] = ["## Summary", "(synthesis model unavailable — raw matches below)", "", "## Sources"];

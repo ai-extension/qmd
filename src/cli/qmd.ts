@@ -2871,6 +2871,8 @@ function parseCLI() {
       // Graph / ask options
       graph: { type: "boolean" },        // ask: also query the code graph
       "graph-name": { type: "string" },  // ask/graph: which registered graph
+      extract: { type: "boolean" },      // ask: extractive (no generation, verbatim)
+      select: { type: "boolean" },       // ask: model selects passages, quoted verbatim
       key: { type: "string" },           // doc save: content key/topic
       watch: { type: "boolean" },  // collection add --watch: enable auto-update on read
       // Embed options
