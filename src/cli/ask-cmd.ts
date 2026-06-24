@@ -12,7 +12,7 @@ import { listGraphs, getGraph } from "../collections.js";
 import { runGraph, GraphNotBuiltError } from "../graph-adapter.js";
 import { withLLMSession } from "../llm.js";
 import { hybridQuery, type Store } from "../store.js";
-import { synthesizeBrief, type DocInput } from "../agent/synthesize.js";
+import { synthesizeBrief, toDocInput } from "../agent/synthesize.js";
 
 interface AskValues {
   graph?: boolean;
@@ -81,12 +81,7 @@ export async function runAskCommand(
       collection,
       limit,
     });
-    const docs: DocInput[] = results.map((r) => ({
-      displayPath: r.displayPath,
-      title: r.title,
-      snippet: r.bestChunk || r.body.slice(0, 600),
-      score: r.score,
-    }));
+    const docs = results.map((r) => toDocInput(r));
     return synthesizeBrief({ question, docs, graphText, graphName });
   });
 

@@ -29,8 +29,12 @@ import {
   type ExpandedQuery,
   type IndexStatus,
 } from "../index.js";
-import { getConfigPath } from "../collections.js";
+import { getConfigPath, listGraphs, getGraph } from "../collections.js";
 import { enableProductionMode } from "../store.js";
+import { runGraph, GraphNotBuiltError } from "../graph-adapter.js";
+import { synthesizeBrief, toDocInput } from "../agent/synthesize.js";
+import { saveDocToCollection, SaveDocError } from "../agent/save-doc.js";
+import { setDefaultLlamaCpp } from "../llm.js";
 
 // =============================================================================
 // Types for structured content
@@ -173,6 +177,10 @@ async function createMcpServer(store: QMDStore): Promise<McpServer> {
     { name: "qmd", version: getPackageVersion() },
     { instructions: await buildInstructions(store) },
   );
+
+  // The support-AI tools (ask/save_doc) synthesize via getDefaultLlamaCpp();
+  // point that at this store's configured LlamaCpp so they use the right models.
+  if (store.internal.llm) setDefaultLlamaCpp(store.internal.llm);
 
   // Pre-fetch default collection names for search tools
   const defaultCollectionNames = await store.getDefaultCollectionNames();
@@ -555,6 +563,138 @@ Intent-aware lex (C++ performance, not sports):
         content: [{ type: "text", text: summary.join('\n') }],
         structuredContent: status,
       };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: ask — combined doc + code-graph retrieval, synthesized into a brief
+  // by the local support model. The primary agent gets a compact answer.
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "ask",
+    {
+      title: "Ask (synthesized brief)",
+      description:
+        "Answer a question by retrieving docs (and optionally a code graph), then " +
+        "synthesizing a compact brief (Summary / Sources / Code) via the local model. " +
+        "Use this when you want a digested answer rather than raw search hits. Set " +
+        "`graph` to also pull code structure from a registered graph.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        question: z.string().describe("The question to answer."),
+        collections: z.array(z.string()).optional().describe("Restrict docs to these collections."),
+        limit: z.number().optional().default(5).describe("Max doc results to feed synthesis (default 5)."),
+        graph: z.boolean().optional().default(false).describe("Also query a code graph."),
+        graphName: z.string().optional().describe("Which registered graph (required if more than one exists when graph=true)."),
+      },
+    },
+    async ({ question, collections, limit, graph, graphName }) => {
+      // Graph leg (optional).
+      let graphText: string | undefined;
+      let usedGraphName: string | undefined;
+      if (graph) {
+        const all = listGraphs();
+        usedGraphName = graphName ?? (all.length === 1 ? all[0]!.name : undefined);
+        if (!usedGraphName) {
+          return { content: [{ type: "text", text: all.length === 0 ? "No graphs registered." : "Multiple graphs registered — pass graphName." }], isError: false };
+        }
+        const g = getGraph(usedGraphName);
+        if (!g) return { content: [{ type: "text", text: `Graph '${usedGraphName}' not found.` }], isError: false };
+        try {
+          const res = await runGraph("explore", [question, "--path", g.repo], { store: g.store });
+          if (res.code === 0) graphText = res.stdout;
+        } catch (err) {
+          if (err instanceof GraphNotBuiltError) return { content: [{ type: "text", text: err.message }], isError: false };
+          throw err;
+        }
+      }
+
+      await store.autoFreshForRead(collections, { embed: true });
+      const results = await store.search({ query: question, collections, limit });
+      const docs = results.map((r) => toDocInput(r));
+      const brief = await synthesizeBrief({ question, docs, graphText, graphName: usedGraphName });
+
+      return {
+        content: [{ type: "text", text: brief.brief }],
+        structuredContent: brief as unknown as Record<string, unknown>,
+      };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: graph_query — passthrough to the code-graph engine (no synthesis).
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "graph_query",
+    {
+      title: "Code graph query",
+      description:
+        "Query a registered code graph directly. `op` selects the query: explore " +
+        "(relevant source + call paths), query (symbol search), node (one symbol's " +
+        "source + trail), callers, callees, impact, files, status. `arg` is the " +
+        "search/symbol (omit for files/status). Returns the engine's output verbatim.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        op: z.enum(["explore", "query", "node", "callers", "callees", "impact", "files", "status"]).describe("Query operation."),
+        arg: z.string().optional().describe("Search string or symbol name (required for all ops except files/status)."),
+        graphName: z.string().optional().describe("Which registered graph (required if more than one exists)."),
+      },
+    },
+    async ({ op, arg, graphName }) => {
+      const all = listGraphs();
+      const name = graphName ?? (all.length === 1 ? all[0]!.name : undefined);
+      if (!name) {
+        return { content: [{ type: "text", text: all.length === 0 ? "No graphs registered." : "Multiple graphs registered — pass graphName." }], isError: false };
+      }
+      const g = getGraph(name);
+      if (!g) return { content: [{ type: "text", text: `Graph '${name}' not found.` }], isError: false };
+
+      const passArgs = [...(arg ? [arg] : []), "--path", g.repo];
+      try {
+        const res = await runGraph(op, passArgs, { store: g.store });
+        const text = res.stdout.trim() || res.stderr.trim() || "(no output)";
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        if (err instanceof GraphNotBuiltError) return { content: [{ type: "text", text: err.message }], isError: false };
+        throw err;
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: save_doc — store content into a collection; the support model picks
+  // the file/location. Content is written verbatim.
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "save_doc",
+    {
+      title: "Save document",
+      description:
+        "Save content into a docs collection. You supply the content and a short " +
+        "key (topic); the local model decides which file it belongs in (appending " +
+        "to a related file or creating a new one). Content is stored VERBATIM.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        collection: z.string().describe("Target collection name."),
+        key: z.string().describe("Short topic/key for the content."),
+        content: z.string().describe("The content to store (written verbatim)."),
+      },
+    },
+    async ({ collection, key, content }) => {
+      try {
+        const result = await saveDocToCollection({ collectionName: collection, key, content });
+        const note = result.indexed ? "" : " (collection not watched — run update + embed to make it searchable)";
+        return {
+          content: [{ type: "text", text: `${result.mode === "create" ? "Created" : "Appended to"} ${collection}/${result.file}${note}` }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        if (err instanceof SaveDocError) return { content: [{ type: "text", text: err.message }], isError: false };
+        throw err;
+      }
     }
   );
 

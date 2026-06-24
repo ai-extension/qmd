@@ -74,24 +74,52 @@ Two engines, two DBs:
 
 ---
 
-## TODO (next sessions)
+### P3 — `qmd doc save` (AI phụ decides placement)  ✅ tested
+- `src/agent/place-doc.ts` — `decidePlacement({key, content, existingFiles})` →
+  `{file, mode}` via the local model (`FILE:`/`MODE:` format, parsed; kebab-slug
+  fallback). `slugify()` helper.
+- `src/agent/save-doc.ts` — shared core `saveDocToCollection({collectionName,
+  key, content})`: enriches file list with `path — Title: first line` cues,
+  decides placement, sanitizes the path against the collection root, writes
+  VERBATIM (create = `# key` + body; append = `## key` + body). `SaveDocError`.
+- `src/cli/doc-cmd.ts` — `qmd doc save --collection <n> --key "<k>" "<content>"`
+  (content positional or `-`/empty = stdin). `--json`.
+- CLI: `case "doc"` (calls `getStore()` first to configure the LLM), option `key`.
+- Caveat: placement quality is bound by the small generate model — it sometimes
+  creates a new file instead of appending to the obvious one. Bigger generate
+  model improves it. Mechanism (verbatim write, safe path, create/append) is solid.
 
-### P3 — `qmd doc save` (AI phụ decides placement)
-- Command: `qmd doc save --key "<key>" --collection <n> "<content>"`.
-- Flow: primary AI supplies content + key; AI phụ reads the collection's doc
-  tree + key → picks target file + section → writes md (append/create) → reindex.
-- Keep it narrow & safe (sandbox model from earlier discussion): a single
-  `write_note`-style path, write VERBATIM (no summarizing), prefer append/create
-  over blanket overwrite; for true edits use find/replace (see chat). Put the
-  writable collection under git for undo. Reuse `getDefaultLlamaCpp().generate()`
-  for the placement decision.
+### P4 — MCP tools for the primary AI  ✅ tested
+- `src/mcp/server.ts` registers: `ask` (combined brief), `graph_query`
+  (op = explore/query/node/callers/callees/impact/files/status), `save_doc`.
+- `ask` reuses `store.search()` (QMDStore) + `runGraph("explore")` + `synthesizeBrief`.
+- **Key fix:** `createMcpServer` calls `setDefaultLlamaCpp(store.internal.llm)`
+  so `getDefaultLlamaCpp()` (used by synthesize/place) uses the store's configured
+  models — without it, synthesis fell back to "model unavailable".
+- structuredContent needs `as unknown as Record<string, unknown>` casts (Brief /
+  SaveDocResult lack index signatures).
+- Verified: tools/list shows ask/graph_query/save_doc; `tools/call ask` returns a
+  real synthesized brief.
 
-### P4 — MCP tools for the primary AI
-- Expose in `src/mcp/server.ts`: `ask` (combined brief), `graph_query`/`graph_explore`
-  (namespaced `graph_*`), `save_doc`. Plus existing search/get.
-- Reuse `runAskCommand`/adapter/synthesize logic (extract shared fns if needed).
-- Mirror the existing tool registration pattern (`server.registerTool`). The
-  search tool already takes a `collections` filter; add a `graphs`/`graph` arg.
+### Synthesis quality fix (ask gave generic answers)
+Symptom: `ask "how do schedules work"` returned a generic platform overview.
+Root cause was NOT the model — feeding it ONLY schedules.md produced a perfect
+answer. The real issues: (a) the reranker put the general `user_manual.md` first
+(schedules.md's best chunk was just a heading → low score), and (b) the small
+model anchors on the FIRST excerpt. Fixes in `src/agent/synthesize.ts`:
+- `toDocInput(r)` — feed the whole small doc / a wide window around bestChunkPos,
+  not the tiny best chunk (used by both CLI ask and MCP ask).
+- `orderByTopicMatch(question, docs)` — lexical title/path match boost puts the
+  on-topic doc first (overrides misleading rerank order for synthesis).
+- Sharper SYNTHESIS_SYSTEM: answer the specific question, ignore tangential
+  platform overviews.
+Lesson: garbage-in → garbage-out; fix the content fed before blaming the model.
+
+## ALL PHASES DONE (P0–P4). Possible follow-ups:
+- Better placement (P3) via retrieval-biased file pick or a larger generate model.
+- `ask --json` already returns {question, brief, usedGraph}; could add structured
+  docs/code arrays if the primary agent needs them machine-readable.
+- Consider a `graph_explore`-only convenience tool if `graph_query` op enum is clunky.
 
 ---
 

@@ -2871,6 +2871,7 @@ function parseCLI() {
       // Graph / ask options
       graph: { type: "boolean" },        // ask: also query the code graph
       "graph-name": { type: "string" },  // ask/graph: which registered graph
+      key: { type: "string" },           // doc save: content key/topic
       watch: { type: "boolean" },  // collection add --watch: enable auto-update on read
       // Embed options
       force: { type: "boolean", short: "f" },
@@ -4278,6 +4279,13 @@ if (isMain) {
     case "ask": {
       const { runAskCommand } = await import("./ask-cmd.js");
       await runAskCommand(getStore(), cli.args, cli.values as Record<string, unknown>);
+      break;
+    }
+
+    case "doc": {
+      getStore(); // configure the default LLM (generate model) from config
+      const { runDocCommand } = await import("./doc-cmd.js");
+      await runDocCommand(cli.args, cli.values as Record<string, unknown>);
       break;
     }
 
