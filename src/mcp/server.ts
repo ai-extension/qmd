@@ -32,7 +32,7 @@ import {
 import { getConfigPath, listGraphs, getGraph } from "../collections.js";
 import { enableProductionMode } from "../store.js";
 import { runGraph, GraphNotBuiltError } from "../graph-adapter.js";
-import { synthesizeBrief, extractBrief, selectBrief, toDocInput } from "../agent/synthesize.js";
+import { synthesizeBrief, selectBrief, toDocInput } from "../agent/synthesize.js";
 import { saveDocToCollection, SaveDocError } from "../agent/save-doc.js";
 import { setDefaultLlamaCpp } from "../llm.js";
 
@@ -587,11 +587,10 @@ Intent-aware lex (C++ performance, not sports):
         limit: z.number().optional().default(5).describe("Max doc results to feed synthesis (default 5)."),
         graph: z.boolean().optional().default(false).describe("Also query a code graph."),
         graphName: z.string().optional().describe("Which registered graph (required if more than one exists when graph=true)."),
-        extract: z.boolean().optional().default(false).describe("Extractive mode: return verbatim excerpts around the matched passage, no LLM."),
-        select: z.boolean().optional().default(false).describe("Model-selected verbatim: the model picks the most relevant passages but quotes are exact (no rewriting)."),
+        summary: z.boolean().optional().default(false).describe("Abstractive summary: the local model rewrites a brief. Default (false) returns the model-selected passages VERBATIM — preferred, since you can synthesize better than the small local model."),
       },
     },
-    async ({ question, collections, limit, graph, graphName, extract, select }) => {
+    async ({ question, collections, limit, graph, graphName, summary }) => {
       // Graph leg (optional).
       let graphText: string | undefined;
       let usedGraphName: string | undefined;
@@ -614,13 +613,10 @@ Intent-aware lex (C++ performance, not sports):
 
       await store.autoFreshForRead(collections, { embed: true });
       const results = await store.search({ query: question, collections, limit });
-      const docs = results.map((r) => toDocInput(r, extract ? 600 : 2000));
+      const docs = results.map((r) => toDocInput(r));
       const synthInput = { question, docs, graphText, graphName: usedGraphName };
-      const brief = select
-        ? await selectBrief(synthInput)
-        : extract
-          ? extractBrief(synthInput)
-          : await synthesizeBrief(synthInput);
+      // Default: verbatim model-selected passages. --summary: abstractive rewrite.
+      const brief = summary ? await synthesizeBrief(synthInput) : await selectBrief(synthInput);
 
       return {
         content: [{ type: "text", text: brief.brief }],

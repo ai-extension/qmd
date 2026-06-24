@@ -12,7 +12,7 @@ import { listGraphs, getGraph } from "../collections.js";
 import { runGraph, GraphNotBuiltError } from "../graph-adapter.js";
 import { withLLMSession } from "../llm.js";
 import { hybridQuery, type Store } from "../store.js";
-import { synthesizeBrief, extractBrief, selectBrief, toDocInput } from "../agent/synthesize.js";
+import { synthesizeBrief, selectBrief, toDocInput } from "../agent/synthesize.js";
 
 interface AskValues {
   graph?: boolean;
@@ -22,8 +22,7 @@ interface AskValues {
   n?: string;
   "no-rerank"?: boolean;
   "no-expansion"?: boolean;
-  extract?: boolean;
-  select?: boolean;
+  summary?: boolean;
   [k: string]: unknown;
 }
 
@@ -87,12 +86,12 @@ export async function runAskCommand(
       skipRerank: values["no-rerank"] === true,
       skipExpansion: values["no-expansion"] === true,
     });
-    // extract = tight window, no model. select/synthesis = wider context.
-    const docs = results.map((r) => toDocInput(r, values.extract ? 600 : 2000));
+    const docs = results.map((r) => toDocInput(r));
     const synthInput = { question, docs, graphText, graphName };
-    if (values.select) return selectBrief(synthInput);   // model picks, verbatim
-    if (values.extract) return extractBrief(synthInput); // no model, verbatim
-    return synthesizeBrief(synthInput);                  // model rewrites
+    // Default: model SELECTS the relevant passages and returns them verbatim
+    // (the consumer — usually a smarter primary AI — gets accurate source text).
+    // --summary: let the local model rewrite an abstractive brief instead.
+    return values.summary ? synthesizeBrief(synthInput) : selectBrief(synthInput);
   });
 
   if (values.json) {
