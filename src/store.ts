@@ -332,6 +332,12 @@ export const STRONG_SIGNAL_MIN_GAP = 0.15;
 // 40 keeps rank 31-40 visible to the reranker (matters for recall on broad queries).
 export const RERANK_CANDIDATE_LIMIT = 40;
 
+// Final ranking blends a min-max normalized RRF score with the reranker's 0-1
+// relevance, on the same scale. Weight is the RRF share; the rest goes to the
+// reranker. Leans on the reranker (the direct relevance judge) while keeping
+// RRF as a real signal so a noisy rerank can't fully wreck good retrieval.
+export const RERANK_BLEND_RRF_WEIGHT = 0.35;
+
 /**
  * A typed query expansion result. Decoupled from llm.ts internal Queryable —
  * same shape, but store.ts owns its own public API type.
@@ -4861,16 +4867,23 @@ export async function hybridQuery(
   }]));
   const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
 
+  // Normalize RRF scores to 0-1 across the reranked set so they blend on the
+  // same scale as the reranker's 0-1 relevance. Raw 1/rank was too steep — the
+  // rank1↔rank2 gap (0.5) dwarfed the reranker's max contribution, so the
+  // reranker could never reorder top results (it buried schedules.md 0.73 under
+  // user_manual.md 0.50). Min-max normalization compresses that gap to what the
+  // actual score spread justifies, so the reranker can win when it's confident.
+  const rrfRaw = new Map(reranked.map(r => [r.file, rrfTraceByFile?.get(r.file)?.totalScore ?? 0]));
+  const rrfVals = [...rrfRaw.values()];
+  const rrfMin = Math.min(...rrfVals), rrfMax = Math.max(...rrfVals);
+  const normRrf = (v: number) => (rrfMax > rrfMin ? (v - rrfMin) / (rrfMax - rrfMin) : 0.5);
+
   const blended = reranked.map(r => {
     const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
     const rrfScore = 1 / rrfRank;
-    // Reranker is the PRIMARY relevance judge; RRF is only a tie-breaker for
-    // near-equal rerank scores (see sort below). The reranker scores chunk↔query
-    // relevance directly, so it must be able to reorder top RRF results — the
-    // old position-protected blend could not (a rank-2 doc needed a >1.5 rerank
-    // lead to overtake rank-1, impossible on a 0-1 scale), which buried the
-    // correct doc (e.g. schedules.md rerank 0.73 lost to user_manual.md 0.50).
-    const blendedScore = r.score;
+    const rrfNorm = normRrf(rrfRaw.get(r.file) ?? 0);
+    // Blend on a common 0-1 scale, leaning on the reranker (see RERANK_BLEND_RRF_WEIGHT).
+    const blendedScore = RERANK_BLEND_RRF_WEIGHT * rrfNorm + (1 - RERANK_BLEND_RRF_WEIGHT) * r.score;
 
     const candidate = candidateMap.get(r.file);
     const chunkInfo = docChunkMap.get(r.file);
@@ -4884,7 +4897,7 @@ export async function hybridQuery(
       rrf: {
         rank: rrfRank,
         positionScore: rrfScore,
-        weight: 0,
+        weight: RERANK_BLEND_RRF_WEIGHT,
         baseScore: trace?.baseScore ?? 0,
         topRankBonus: trace?.topRankBonus ?? 0,
         totalScore: trace?.totalScore ?? 0,
@@ -4906,13 +4919,11 @@ export async function hybridQuery(
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
-  }).sort((a, b) => {
-    // Primary: rerank score bucketed to 0.01 so genuinely-close scores tie.
-    const ra = Math.round(a.score * 100), rb = Math.round(b.score * 100);
-    if (rb !== ra) return rb - ra;
-    // Tie-break: original RRF (BM25+vector) rank.
-    return (rrfRankMap.get(a.file) ?? 9999) - (rrfRankMap.get(b.file) ?? 9999);
-  });
+  }).sort((a, b) =>
+    // Blended score desc; original RRF rank breaks exact ties.
+    (b.score - a.score) ||
+    ((rrfRankMap.get(a.file) ?? 9999) - (rrfRankMap.get(b.file) ?? 9999))
+  );
 
   // Step 8: Dedup by file (safety net — prevents duplicate output)
   const seenFiles = new Set<string>();
@@ -5274,16 +5285,23 @@ export async function structuredSearch(
   }]));
   const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
 
+  // Normalize RRF scores to 0-1 across the reranked set so they blend on the
+  // same scale as the reranker's 0-1 relevance. Raw 1/rank was too steep — the
+  // rank1↔rank2 gap (0.5) dwarfed the reranker's max contribution, so the
+  // reranker could never reorder top results (it buried schedules.md 0.73 under
+  // user_manual.md 0.50). Min-max normalization compresses that gap to what the
+  // actual score spread justifies, so the reranker can win when it's confident.
+  const rrfRaw = new Map(reranked.map(r => [r.file, rrfTraceByFile?.get(r.file)?.totalScore ?? 0]));
+  const rrfVals = [...rrfRaw.values()];
+  const rrfMin = Math.min(...rrfVals), rrfMax = Math.max(...rrfVals);
+  const normRrf = (v: number) => (rrfMax > rrfMin ? (v - rrfMin) / (rrfMax - rrfMin) : 0.5);
+
   const blended = reranked.map(r => {
     const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
     const rrfScore = 1 / rrfRank;
-    // Reranker is the PRIMARY relevance judge; RRF is only a tie-breaker for
-    // near-equal rerank scores (see sort below). The reranker scores chunk↔query
-    // relevance directly, so it must be able to reorder top RRF results — the
-    // old position-protected blend could not (a rank-2 doc needed a >1.5 rerank
-    // lead to overtake rank-1, impossible on a 0-1 scale), which buried the
-    // correct doc (e.g. schedules.md rerank 0.73 lost to user_manual.md 0.50).
-    const blendedScore = r.score;
+    const rrfNorm = normRrf(rrfRaw.get(r.file) ?? 0);
+    // Blend on a common 0-1 scale, leaning on the reranker (see RERANK_BLEND_RRF_WEIGHT).
+    const blendedScore = RERANK_BLEND_RRF_WEIGHT * rrfNorm + (1 - RERANK_BLEND_RRF_WEIGHT) * r.score;
 
     const candidate = candidateMap.get(r.file);
     const chunkInfo = docChunkMap.get(r.file);
@@ -5297,7 +5315,7 @@ export async function structuredSearch(
       rrf: {
         rank: rrfRank,
         positionScore: rrfScore,
-        weight: 0,
+        weight: RERANK_BLEND_RRF_WEIGHT,
         baseScore: trace?.baseScore ?? 0,
         topRankBonus: trace?.topRankBonus ?? 0,
         totalScore: trace?.totalScore ?? 0,
@@ -5319,13 +5337,11 @@ export async function structuredSearch(
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
-  }).sort((a, b) => {
-    // Primary: rerank score bucketed to 0.01 so genuinely-close scores tie.
-    const ra = Math.round(a.score * 100), rb = Math.round(b.score * 100);
-    if (rb !== ra) return rb - ra;
-    // Tie-break: original RRF (BM25+vector) rank.
-    return (rrfRankMap.get(a.file) ?? 9999) - (rrfRankMap.get(b.file) ?? 9999);
-  });
+  }).sort((a, b) =>
+    // Blended score desc; original RRF rank breaks exact ties.
+    (b.score - a.score) ||
+    ((rrfRankMap.get(a.file) ?? 9999) - (rrfRankMap.get(b.file) ?? 9999))
+  );
 
   // Step 7: Dedup by file
   const seenFiles = new Set<string>();

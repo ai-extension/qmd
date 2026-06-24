@@ -132,11 +132,16 @@ Symptom: `query/ask "how do schedules work"` ranked the general `user_manual.md`
 reranker was CORRECT (schedules 0.729 > user_manual 0.504) but the old blend
 `0.75·(1/rrfRank) + 0.25·rerank` weighted RRF position so heavily that a rank-2
 doc needed a >1.5 rerank lead to overtake rank-1 — mathematically impossible, so
-rerank could never reorder top RRF results. Fix (`src/store.ts`, both
-`hybridQuery` and `structuredSearch`): **rerank is primary** (`score = rerankScore`),
-**RRF is only a tie-break** for near-equal rerank scores (bucketed to 0.01).
-After: schedules.md #1 (0.73), user_manual.md #4 (0.50). Affects all of
-query/search/ask. (`synthesize.ts orderByTopicMatch` is now a redundant safeguard.)
+rerank could never reorder top RRF results. Final fix (`src/store.ts`, both
+`hybridQuery` and `structuredSearch`): **min-max normalize the RRF score to 0-1**
+then **blend on the same scale** as the reranker's 0-1 relevance:
+`score = RERANK_BLEND_RRF_WEIGHT·rrfNorm + (1−w)·rerankScore`, `w = 0.35` (leans
+reranker). The old blend mixed `1/rank` (steep) with rerank (0-1) — incommensurable
+scales — so RRF position dominated; normalizing compresses the rank1↔rank2 gap to
+what the actual score spread justifies, letting a confident reranker win while RRF
+still keeps a real voice. After: schedules.md #1 (0.70, rerank 0.73), user_manual.md
+#2 (0.68, highest RRF) — correct winner, retrieval not discarded. Tunable via
+`RERANK_BLEND_RRF_WEIGHT`. Affects all of query/search/ask.
 
 ## ALL PHASES DONE (P0–P4). Possible follow-ups:
 - Better placement (P3) via retrieval-biased file pick or a larger generate model.
