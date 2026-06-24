@@ -18,7 +18,7 @@ type NodeLlamaCppModule = {
   getLlama: (options: Record<string, unknown>) => Promise<Llama>;
   getLlamaGpuTypes?: (include?: "supported" | "allValid") => Promise<LlamaGpuMode[]>;
   resolveModelFile: (model: string, cacheDir: string) => Promise<string>;
-  LlamaChatSession: new (options: { contextSequence: unknown }) => {
+  LlamaChatSession: new (options: { contextSequence: unknown; systemPrompt?: string }) => {
     prompt: (prompt: string, options?: Record<string, unknown>) => Promise<string>;
   };
   LlamaLogLevel: { error: unknown };
@@ -1463,6 +1463,31 @@ export class LlamaCpp implements LLM {
     const context = options.context;
 
     const intent = options.intent;
+    // Detailed task description lives in the system prompt so general instruct
+    // models (e.g. Qwen2.5-Instruct) — not just the fine-tuned default — know
+    // what lex/vec/hyde mean and how to fill them. The output *shape* is still
+    // enforced by the GBNF grammar below; this steers the *content* quality.
+    const systemPrompt = [
+      "Expand a search query into 3-5 retrieval variants. One per line as \"<type>: <text>\".",
+      "- lex: BM25 keyword query. Core terms only, \"quote\" phrases, -exclude wrong senses.",
+      "- vec: natural-language paraphrase, one clear sentence.",
+      "- hyde: 1-2 sentence hypothetical passage answering the query.",
+      "Stay on the original topic. Always include a vec and a hyde. Output only the variants.",
+      "",
+      "Rules:",
+      "- Produce 3-5 variants. Always include at least one vec and one hyde.",
+      "- Every variant must contain the original query's core subject. Never drift",
+      "  to unrelated topics or add synonyms that change the meaning.",
+      "- If a query intent is given, use it only to disambiguate; do not broaden",
+      "  the scope beyond it.",
+      "- Output only the variants — no numbering, no commentary, no blank lines.",
+      "",
+      "Example — Query: how to reduce Docker image size",
+      'lex: docker image size "multi-stage build" -kubernetes',
+      "vec: techniques to make a Docker image smaller",
+      "hyde: To shrink a Docker image, use multi-stage builds and a slim base like alpine.",
+    ].join("\n");
+
     const prompt = intent
       ? `/no_think Expand this search query: ${query}\nQuery intent: ${intent}`
       : `/no_think Expand this search query: ${query}`;
@@ -1487,7 +1512,7 @@ export class LlamaCpp implements LLM {
       });
       const sequence = genContext.getSequence();
       const { LlamaChatSession } = await loadNodeLlamaCpp();
-      const session = new LlamaChatSession({ contextSequence: sequence });
+      const session = new LlamaChatSession({ contextSequence: sequence, systemPrompt });
 
       // Qwen3 recommended settings for non-thinking mode:
       // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition

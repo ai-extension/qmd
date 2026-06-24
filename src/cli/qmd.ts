@@ -2868,6 +2868,9 @@ function parseCLI() {
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
+      // Graph / ask options
+      graph: { type: "boolean" },        // ask: also query the code graph
+      "graph-name": { type: "string" },  // ask/graph: which registered graph
       watch: { type: "boolean" },  // collection add --watch: enable auto-update on read
       // Embed options
       force: { type: "boolean", short: "f" },
@@ -4263,6 +4266,18 @@ if (isMain) {
 
     case "ls": {
       listFiles(cli.args[0]);
+      break;
+    }
+
+    case "graph": {
+      const { runGraphCommand } = await import("./graph-cmd.js");
+      await runGraphCommand(cli.args, cli.values as Record<string, unknown>);
+      break;
+    }
+
+    case "ask": {
+      const { runAskCommand } = await import("./ask-cmd.js");
+      await runAskCommand(getStore(), cli.args, cli.values as Record<string, unknown>);
       break;
     }
 

@@ -44,6 +44,17 @@ export interface ModelsConfig {
 }
 
 /**
+ * A registered code graph (codegraph engine, vendored under graph/).
+ * Stored separately from collections — graphs use their own DB
+ * (<store>/.codegraph/codegraph.db), managed by the graph engine.
+ */
+export interface GraphConfig {
+  repo: string;    // Absolute path to the source repo that was indexed
+  store: string;   // Absolute path to the directory holding .codegraph/
+  db: string;      // Absolute path to the codegraph.db file
+}
+
+/**
  * The complete configuration file structure
  */
 export interface CollectionConfig {
@@ -52,6 +63,7 @@ export interface CollectionConfig {
   editor_uri_template?: string;               // Alias for editor_uri
   collections: Record<string, Collection>;    // Collection name -> config
   models?: ModelsConfig;
+  graphs?: Record<string, GraphConfig>;       // Graph name -> config
 }
 
 /**
@@ -369,6 +381,45 @@ export function renameCollection(oldName: string, newName: string): boolean {
 
   config.collections[newName] = config.collections[oldName];
   delete config.collections[oldName];
+  saveConfig(config);
+  return true;
+}
+
+// ============================================================================
+// Graph registry (codegraph engine)
+// ============================================================================
+
+/** A registered graph with its name attached. */
+export interface NamedGraph extends GraphConfig {
+  name: string;
+}
+
+/** Get a single registered graph by name. */
+export function getGraph(name: string): NamedGraph | null {
+  const config = loadConfig();
+  const graph = config.graphs?.[name];
+  return graph ? { name, ...graph } : null;
+}
+
+/** List all registered graphs. */
+export function listGraphs(): NamedGraph[] {
+  const config = loadConfig();
+  return Object.entries(config.graphs ?? {}).map(([name, g]) => ({ name, ...g }));
+}
+
+/** Register (or overwrite) a graph. */
+export function addGraph(name: string, graph: GraphConfig): void {
+  const config = loadConfig();
+  if (!config.graphs) config.graphs = {};
+  config.graphs[name] = graph;
+  saveConfig(config);
+}
+
+/** Remove a registered graph. Returns false if it did not exist. */
+export function removeGraph(name: string): boolean {
+  const config = loadConfig();
+  if (!config.graphs?.[name]) return false;
+  delete config.graphs[name];
   saveConfig(config);
   return true;
 }
