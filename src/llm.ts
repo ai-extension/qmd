@@ -250,7 +250,13 @@ export type RerankDocument = {
 // Format: hf:<user>/<repo>/<file>
 // Override via QMD_EMBED_MODEL env var (e.g. hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf)
 const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
+// bge-reranker-v2-m3 (gpustack GGUF) is a multilingual BERT cross-encoder. The
+// gpustack conversion declares arch `bert` (supported by the bundled llama.cpp),
+// unlike the original BGE `xlmr` GGUFs which fail to load. Benchmarked ~13x
+// faster per doc than the Qwen3-0.6B causal reranker (single non-causal encode
+// pass vs autoregressive scoring), with sharper relevance separation and
+// Vietnamese/multilingual support. Override via QMD_RERANK_MODEL / models.rerank.
+const DEFAULT_RERANK_MODEL = "hf:gpustack/bge-reranker-v2-m3-GGUF/bge-reranker-v2-m3-Q4_K_M.gguf";
 // const DEFAULT_GENERATE_MODEL = "hf:ggml-org/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf";
 const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf";
 

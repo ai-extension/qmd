@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Default rerank model switched from `Qwen3-Reranker-0.6B-Q8_0` to
+  `bge-reranker-v2-m3-Q4_K_M` (gpustack GGUF). The gpustack conversion declares
+  the `bert` architecture supported by the bundled llama.cpp (the original BGE
+  `xlmr` GGUFs fail to load), runs as a single non-causal cross-encoder pass, and
+  benchmarked ~13x faster per document than the Qwen3 causal reranker with sharper
+  relevance separation and multilingual (incl. Vietnamese) support. Override via
+  `QMD_RERANK_MODEL` or `models.rerank` to restore the previous model.
+
 ## [2.5.6] - 2026-06-22
 
 ### Changed
